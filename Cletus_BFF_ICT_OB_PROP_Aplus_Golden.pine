@@ -1,0 +1,1174 @@
+//@version=6
+indicator("Cletus BFF-Style Dots + ICT Order Blocks 20/200 PROP A+ OB Labels", shorttitle="BFFPROP20", overlay=true,
+     max_labels_count=500, max_lines_count=500, max_boxes_count=250, max_bars_back=2000)
+
+// =====================================================================
+// CLETUS BFF-STYLE DOTS + ICT ORDER BLOCKS 20/200
+// Clean-room reconstruction based on public guide concepts + screenshots.
+// Includes alerts for new Bullish and Bearish Order Blocks.
+// Adds large BUY / SELL labels at the exact OB candle whenever a new OB alert fires.
+// =====================================================================
+
+
+// =====================================================================
+// 1. INPUTS
+// =====================================================================
+
+// ----- Moving averages / trend
+groupTrend = "01. Trend / Moving Averages"
+primaryLen      = input.int(20, "Primary SMA Length - use 20 for your system, 8 for original guide", minval=1, group=groupTrend)
+trendLen        = input.int(200, "Trend SMA Length", minval=20, group=groupTrend)
+slopeLookback   = input.int(3, "Primary SMA Slope Lookback", minval=1, group=groupTrend)
+trendMode       = input.string("VWAP + 200 SMA", "Trend Filter", options=["Off", "VWAP", "200 SMA", "VWAP + 200 SMA"], group=groupTrend)
+showVWAP        = input.bool(true, "Show VWAP", group=groupTrend)
+showTrendSMA    = input.bool(true, "Show 200 SMA", group=groupTrend)
+showPrimarySMA  = input.bool(true, "Show Primary SMA", group=groupTrend)
+
+// ----- Dot engine
+groupDots = "02. Dot Engine"
+useOBBiasForDots  = input.bool(true, "Only allow dots in latest OB direction", group=groupDots)
+useRangeFloor     = input.bool(true, "Use ATR Range Floor", group=groupDots)
+atrLen            = input.int(14, "ATR Length", minval=1, group=groupDots)
+minRangeATR       = input.float(0.25, "Minimum Candle Range x ATR", minval=0.0, step=0.05, group=groupDots)
+useROCFilter      = input.bool(false, "Use ROC Filter", group=groupDots)
+rocLen            = input.int(20, "ROC Length", minval=1, group=groupDots)
+minAbsROC         = input.float(0.05, "Minimum Absolute ROC %", step=0.01, group=groupDots)
+confirmOnClose    = input.bool(true, "Confirm Signals On Bar Close", group=groupDots)
+
+// ----- Order block engine
+groupOB = "03. ICT Order Blocks"
+showOB              = input.bool(true, "Show Order Blocks", group=groupOB)
+showOnlyLatestOB    = input.bool(false, "Show Only Latest Active OB", group=groupOB)
+obBreakLookback     = input.int(8, "Breakout Lookback", minval=2, maxval=100, group=groupOB)
+obSearchBars        = input.int(12, "Search Bars For Last Opposing Candle", minval=1, maxval=50, group=groupOB)
+obDisplacementATR   = input.float(0.50, "Breakout Displacement x ATR", minval=0.0, step=0.05, group=groupOB)
+obUseWicks          = input.bool(true, "Use Full Wick Zone", group=groupOB)
+obExtendBars        = input.int(60, "OB Extension Bars", minval=1, maxval=500, group=groupOB)
+showMitigation      = input.bool(true, "Mark OB As Mitigated When Tapped", group=groupOB)
+invalidateOnClose   = input.bool(true, "Invalidate OB Bias On Close Beyond Zone", group=groupOB)
+showNewOBLabels    = input.bool(true, "Show Large BUY / SELL Label When New OB Alert Fires", group=groupOB)
+obAlertLabelSizeOpt = input.string("Huge", "New OB Alert Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group=groupOB)
+
+// ----- Signal setups
+groupSignals = "04. Strategy Signals"
+showSignalLabels   = input.bool(true, "Show BUY/SELL Labels", group=groupSignals)
+showSetupLabels    = input.bool(true, "Show Setup Type Labels", group=groupSignals)
+confirmWindow      = input.int(10, "Dot Confirm Window", minval=1, maxval=50, group=groupSignals)
+usePullaway        = input.bool(true, "Enable Pullaway Signals", group=groupSignals)
+strictPullaway     = input.bool(false, "Strict Pullaway: whole candle beyond primary SMA", group=groupSignals)
+useEngulfing       = input.bool(true, "Enable Engulfing Dot Signals", group=groupSignals)
+useInverseEngulf   = input.bool(true, "Enable Inverse Engulfing Signals", group=groupSignals)
+
+// ----- PROP / A+ signal engine
+groupProp = "04B. PROP / A+ Signals"
+showPropLabels       = input.bool(true, "Show PROP / A+ BUY-SELL Labels", group=groupProp)
+showPropRiskLines    = input.bool(true, "Show TP / SL Lines On PROP / A+ Signals", group=groupProp)
+propThreshold        = input.float(75.0, "PROP Threshold %", minval=50.0, maxval=100.0, step=1.0, group=groupProp)
+aPlusThreshold       = input.float(90.0, "A+ Threshold %", minval=60.0, maxval=100.0, step=1.0, group=groupProp)
+usePropVWAPFilter    = input.bool(true, "PROP Requires VWAP Alignment", group=groupProp)
+usePropOBFilter      = input.bool(true, "PROP Requires Latest OB Direction", group=groupProp)
+usePropAntiExtension = input.bool(true, "Avoid Over-Extended Entries", group=groupProp)
+maxPropExtensionATR  = input.float(1.50, "Max Distance From Primary SMA x ATR", minval=0.25, step=0.25, group=groupProp)
+usePropBodyFilter    = input.bool(true, "Require Strong Signal Candle Body", group=groupProp)
+minPropBodyATR       = input.float(0.15, "Minimum Body x ATR For PROP/A+", minval=0.0, step=0.05, group=groupProp)
+propLabelSizeOpt     = input.string("Large", "PROP / A+ Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group=groupProp)
+
+
+// ----- Risk lines
+groupRisk = "05. Risk / TP / SL"
+showRiskLines     = input.bool(true, "Show TP / SL Lines On Signals", group=groupRisk)
+riskMode          = input.string("Signal Bar", "Risk Model", options=["Signal Bar", "Fixed Points"], group=groupRisk)
+bufferTicks       = input.int(5, "Signal Bar SL Buffer In Ticks", minval=0, group=groupRisk)
+rrTarget          = input.float(1.0, "Signal Bar Target R", minval=0.25, step=0.25, group=groupRisk)
+fixedTPPoints     = input.float(5.0, "Fixed TP Points", minval=0.25, step=0.25, group=groupRisk)
+fixedSLPoints     = input.float(15.0, "Fixed SL Points", minval=0.25, step=0.25, group=groupRisk)
+riskLineBars      = input.int(20, "TP / SL Line Length", minval=1, maxval=200, group=groupRisk)
+
+// ----- Sessions
+groupSess = "06. Session Boxes"
+showSessions    = input.bool(true, "Show Session Range Boxes", group=groupSess)
+sessionTZ       = input.string("America/New_York", "Session Timezone", group=groupSess)
+asiaSession     = input.session("1800-0200", "Asia Session", group=groupSess)
+europeSession   = input.session("0300-0700", "Europe / London Core", group=groupSess)
+nySession       = input.session("0930-1130", "NY Cash Open", group=groupSess)
+sessExtendBars  = input.int(0, "Extend Active Session Box Bars", minval=0, maxval=100, group=groupSess)
+
+// ----- Visuals
+groupVis = "07. Visuals"
+showCandleColors = input.bool(true, "Color Candles Like BFF", group=groupVis)
+showDots         = input.bool(true, "Show Dots", group=groupVis)
+showVWAPLabel    = input.bool(true, "Show VWAP Price Label", group=groupVis)
+showBackground   = input.bool(false, "Soft Background By OB Bias", group=groupVis)
+
+// ----- Table
+groupTable = "08. Continuity Table"
+showWRTable      = input.bool(true, "Show Continuity Table", group=groupTable)
+tablePosition    = input.string("Top Right", "Table Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=groupTable)
+tableTPText      = input.string("5tp", "Table TP Text", group=groupTable)
+tableSLText      = input.string("15st", "Table SL Text", group=groupTable)
+warnHigherTF     = input.bool(true, "Warn If Above 1-Minute TF", group=groupTable)
+
+// ----- Alerts
+groupAlerts = "09. Alerts / Webhook"
+enableRuntimeAlerts = input.bool(true, "Enable alert() JSON Webhook Messages", group=groupAlerts)
+webhookQty          = input.float(0.01, "Webhook Qty / Lot Size", minval=0.0, step=0.01, group=groupAlerts)
+
+// ----- NEW: Golden hour signals + OB retest signals
+groupNew = "10. GOLDEN + OB RETEST Signals (New)"
+showGoldenLabels     = input.bool(true, "Show GOLDEN BUY/SELL Labels (Hour Win-Rate Boost)", group=groupNew)
+goldenThreshold      = input.float(78.0, "Golden Hour Win-Rate Threshold %", minval=60.0, maxval=95.0, step=0.5, group=groupNew)
+goldenLabelSizeOpt   = input.string("Large", "Golden Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group=groupNew)
+showOBRetest         = input.bool(true, "Show OB RETEST BUY/SELL Labels", group=groupNew)
+obRetestUseTrend     = input.bool(true, "OB Retest Requires Trend Filter Alignment", group=groupNew)
+obRetestLabelSizeOpt = input.string("Large", "OB Retest Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group=groupNew)
+showNewRiskLines     = input.bool(true, "Show TP / SL Lines On Golden / OB Retest Signals", group=groupNew)
+newSigSession        = input.string("All Sessions", "Session Filter For New Signals Only", options=["All Sessions", "NY Only", "London + NY"], group=groupNew)
+
+// ----- NEW: Prop risk dashboard
+groupDash = "11. Prop Risk Dashboard (New)"
+showPropDash    = input.bool(true, "Show Prop Risk Dashboard", group=groupDash)
+dashPosition    = input.string("Bottom Left", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=groupDash)
+riskPerTrade    = input.float(200.0, "Account Risk Per Trade $", minval=1.0, step=25.0, group=groupDash)
+maxTradesPerDay = input.int(5, "Max Quality Signals Per Day Guard", minval=1, maxval=50, group=groupDash)
+
+
+// =====================================================================
+// 2. CORE CALCULATIONS
+// =====================================================================
+
+primarySMA = ta.sma(close, primaryLen)
+trendSMA   = ta.sma(close, trendLen)
+vwapValue  = ta.vwap(hlc3)
+atr        = ta.atr(atrLen)
+barRange   = high - low
+bodySize   = math.abs(close - open)
+
+primarySlopeUp   = primarySMA > primarySMA[slopeLookback]
+primarySlopeDown = primarySMA < primarySMA[slopeLookback]
+
+trendLongOK =
+     trendMode == "Off" ? true :
+     trendMode == "VWAP" ? close >= vwapValue :
+     trendMode == "200 SMA" ? close >= trendSMA :
+     close >= vwapValue and close >= trendSMA
+
+trendShortOK =
+     trendMode == "Off" ? true :
+     trendMode == "VWAP" ? close <= vwapValue :
+     trendMode == "200 SMA" ? close <= trendSMA :
+     close <= vwapValue and close <= trendSMA
+
+rangeOK = not useRangeFloor or barRange >= atr * minRangeATR
+rocValue = ta.roc(close, rocLen)
+rocOK = not useROCFilter or math.abs(rocValue) >= minAbsROC
+barCloseOK = not confirmOnClose or barstate.isconfirmed
+
+f_labelSize(_s) =>
+    _s == "Tiny" ? size.tiny :
+     _s == "Small" ? size.small :
+     _s == "Normal" ? size.normal :
+     _s == "Huge" ? size.huge :
+     size.large
+
+propLabelSize = f_labelSize(propLabelSizeOpt)
+obAlertLabelSize = f_labelSize(obAlertLabelSizeOpt)
+
+
+// =====================================================================
+// 3. ORDER BLOCK ENGINE
+// =====================================================================
+
+var int   obBias = 0
+var float activeBullTop = na
+var float activeBullBot = na
+var float activeBearTop = na
+var float activeBearBot = na
+var box   activeBullBox = na
+var box   activeBearBox = na
+var label activeBullLabel = na
+var label activeBearLabel = na
+var bool  bullMitigated = false
+var bool  bearMitigated = false
+
+bullBreak = close > ta.highest(high, obBreakLookback)[1] and close > open and bodySize >= atr * obDisplacementATR
+bearBreak = close < ta.lowest(low, obBreakLookback)[1] and close < open and bodySize >= atr * obDisplacementATR
+
+int bullOBOffset = na
+int bearOBOffset = na
+
+if bullBreak
+    bullOBOffset := na
+    for i = 1 to obSearchBars
+        if close[i] < open[i]
+            bullOBOffset := i
+            break
+
+if bearBreak
+    bearOBOffset := na
+    for i = 1 to obSearchBars
+        if close[i] > open[i]
+            bearOBOffset := i
+            break
+
+newBullOB = showOB and bullBreak and not na(bullOBOffset)
+newBearOB = showOB and bearBreak and not na(bearOBOffset)
+
+if newBullOB
+    float top = obUseWicks ? high[bullOBOffset] : math.max(open[bullOBOffset], close[bullOBOffset])
+    float bot = obUseWicks ? low[bullOBOffset]  : math.min(open[bullOBOffset], close[bullOBOffset])
+
+    if showOnlyLatestOB
+        if not na(activeBullBox)
+            box.delete(activeBullBox)
+        if not na(activeBearBox)
+            box.delete(activeBearBox)
+        if not na(activeBullLabel)
+            label.delete(activeBullLabel)
+        if not na(activeBearLabel)
+            label.delete(activeBearLabel)
+
+    activeBullTop := top
+    activeBullBot := bot
+    bullMitigated := false
+    obBias := 1
+
+    activeBullBox := box.new(left=bar_index - bullOBOffset, top=top, right=bar_index + obExtendBars, bottom=bot,
+         xloc=xloc.bar_index, bgcolor=color.new(color.lime, 82), border_color=color.new(color.lime, 10))
+
+    activeBullLabel := showNewOBLabels ? label.new(bar_index - bullOBOffset, bot, "BULLISH OB\nBUY",
+         style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=obAlertLabelSize) : na
+
+if newBearOB
+    float top = obUseWicks ? high[bearOBOffset] : math.max(open[bearOBOffset], close[bearOBOffset])
+    float bot = obUseWicks ? low[bearOBOffset]  : math.min(open[bearOBOffset], close[bearOBOffset])
+
+    if showOnlyLatestOB
+        if not na(activeBullBox)
+            box.delete(activeBullBox)
+        if not na(activeBearBox)
+            box.delete(activeBearBox)
+        if not na(activeBullLabel)
+            label.delete(activeBullLabel)
+        if not na(activeBearLabel)
+            label.delete(activeBearLabel)
+
+    activeBearTop := top
+    activeBearBot := bot
+    bearMitigated := false
+    obBias := -1
+
+    activeBearBox := box.new(left=bar_index - bearOBOffset, top=top, right=bar_index + obExtendBars, bottom=bot,
+         xloc=xloc.bar_index, bgcolor=color.new(color.red, 84), border_color=color.new(color.red, 10))
+
+    activeBearLabel := showNewOBLabels ? label.new(bar_index - bearOBOffset, top, "BEARISH OB\nSELL",
+         style=label.style_label_down, color=color.new(color.fuchsia, 0), textcolor=color.white, size=obAlertLabelSize) : na
+
+if showOB and not na(activeBullBox)
+    box.set_right(activeBullBox, bar_index + obExtendBars)
+
+if showOB and not na(activeBearBox)
+    box.set_right(activeBearBox, bar_index + obExtendBars)
+
+bullTapped = obBias == 1 and not na(activeBullTop) and low <= activeBullTop and high >= activeBullBot
+bearTapped = obBias == -1 and not na(activeBearTop) and high >= activeBearBot and low <= activeBearTop
+
+if showMitigation and bullTapped and not bullMitigated and not na(activeBullBox)
+    bullMitigated := true
+    box.set_bgcolor(activeBullBox, color.new(color.lime, 90))
+    label.new(bar_index, activeBullTop, "Bull OB tapped",
+         style=label.style_label_down, color=color.new(color.lime, 60), textcolor=color.black, size=size.tiny)
+
+if showMitigation and bearTapped and not bearMitigated and not na(activeBearBox)
+    bearMitigated := true
+    box.set_bgcolor(activeBearBox, color.new(color.red, 91))
+    label.new(bar_index, activeBearBot, "Bear OB tapped",
+         style=label.style_label_up, color=color.new(color.red, 60), textcolor=color.white, size=size.tiny)
+
+if invalidateOnClose and obBias == 1 and not na(activeBullBot) and close < activeBullBot
+    obBias := 0
+
+if invalidateOnClose and obBias == -1 and not na(activeBearTop) and close > activeBearTop
+    obBias := 0
+
+
+// =====================================================================
+// 4. DOT ENGINE
+// =====================================================================
+
+bullBiasOK = not useOBBiasForDots or obBias == 1
+bearBiasOK = not useOBBiasForDots or obBias == -1
+
+bullGate = bullBiasOK and trendLongOK and rangeOK and rocOK and barCloseOK
+bearGate = bearBiasOK and trendShortOK and rangeOK and rocOK and barCloseOK
+
+greenRaw = close > high[1] and primarySlopeUp
+redRaw   = close < low[1] and primarySlopeDown
+
+var float lastBullDotLow = na
+var float lastBearDotHigh = na
+
+whiteRaw  = greenRaw and not na(lastBullDotLow) and low < lastBullDotLow
+purpleRaw = redRaw and not na(lastBearDotHigh) and high > lastBearDotHigh
+
+whiteDot  = whiteRaw and bullGate
+greenDot  = greenRaw and bullGate and not whiteRaw
+
+purpleDot = purpleRaw and bearGate
+redDot    = redRaw and bearGate and not purpleRaw
+
+if greenDot or whiteDot
+    lastBullDotLow := low
+
+if redDot or purpleDot
+    lastBearDotHigh := high
+
+bullDot = greenDot or whiteDot
+bearDot = redDot or purpleDot
+
+
+// =====================================================================
+// 5. SETUPS: DOT CONFIRM / PULLAWAY / ENGULFING
+// =====================================================================
+
+barsSinceWhite  = ta.barssince(whiteDot)
+barsSincePurple = ta.barssince(purpleDot)
+
+dotConfirmLong  = greenDot and not na(barsSinceWhite) and barsSinceWhite > 0 and barsSinceWhite <= confirmWindow
+dotConfirmShort = redDot and not na(barsSincePurple) and barsSincePurple > 0 and barsSincePurple <= confirmWindow
+
+pullawayLong =
+     usePullaway and obBias == 1 and greenDot and
+     (strictPullaway ? low > primarySMA : close > primarySMA and low <= primarySMA)
+
+pullawayShort =
+     usePullaway and obBias == -1 and redDot and
+     (strictPullaway ? high < primarySMA : close < primarySMA and high >= primarySMA)
+
+engulfLong  = useEngulfing and obBias == 1 and bullDot and not bullDot[1]
+engulfShort = useEngulfing and obBias == -1 and bearDot and not bearDot[1]
+
+inverseEngulfLong  = useInverseEngulf and obBias == 1 and bearDot[1] and not bearDot
+inverseEngulfShort = useInverseEngulf and obBias == -1 and bullDot[1] and not bullDot
+
+longSignal  = pullawayLong or dotConfirmLong or engulfLong or inverseEngulfLong
+shortSignal = pullawayShort or dotConfirmShort or engulfShort or inverseEngulfShort
+
+longSetup =
+     pullawayLong ? "PULLAWAY BUY" :
+     dotConfirmLong ? "DOT CONFIRM BUY" :
+     engulfLong ? "ENGULFING BUY" :
+     inverseEngulfLong ? "INV ENGULF BUY" :
+     "BUY"
+
+shortSetup =
+     pullawayShort ? "PULLAWAY SELL" :
+     dotConfirmShort ? "DOT CONFIRM SELL" :
+     engulfShort ? "ENGULFING SELL" :
+     inverseEngulfShort ? "INV ENGULF SELL" :
+     "SELL"
+
+
+// =====================================================================
+// 5B. PROP / A+ ENGINE - 20 SMA + 200 SMA STRUCTURE
+// =====================================================================
+
+propTrendStackLong  = primarySMA > trendSMA and close > trendSMA and primarySlopeUp
+propTrendStackShort = primarySMA < trendSMA and close < trendSMA and primarySlopeDown
+
+propPrimaryLong  = close > primarySMA
+propPrimaryShort = close < primarySMA
+
+propVWAPLong  = not usePropVWAPFilter or close >= vwapValue
+propVWAPShort = not usePropVWAPFilter or close <= vwapValue
+
+propOBLong  = not usePropOBFilter or obBias == 1
+propOBShort = not usePropOBFilter or obBias == -1
+
+propExtension = atr > 0 ? math.abs(close - primarySMA) / atr : 0.0
+propExtensionOK = not usePropAntiExtension or propExtension <= maxPropExtensionATR
+
+propBodyOK = not usePropBodyFilter or bodySize >= atr * minPropBodyATR
+
+propMomentumLong  = close > open and close > high[1]
+propMomentumShort = close < open and close < low[1]
+
+propPullbackLong  = low <= primarySMA or low[1] <= primarySMA[1] or bullTapped or bullMitigated
+propPullbackShort = high >= primarySMA or high[1] >= primarySMA[1] or bearTapped or bearMitigated
+
+propScoreLong =
+     (longSignal ? 20.0 : 0.0) +
+     (propTrendStackLong ? 20.0 : 0.0) +
+     (trendLongOK ? 10.0 : 0.0) +
+     (propPrimaryLong ? 10.0 : 0.0) +
+     (propVWAPLong ? 10.0 : 0.0) +
+     (propOBLong ? 10.0 : 0.0) +
+     (propExtensionOK ? 10.0 : 0.0) +
+     (propBodyOK ? 5.0 : 0.0) +
+     (propPullbackLong ? 5.0 : 0.0)
+
+propScoreShort =
+     (shortSignal ? 20.0 : 0.0) +
+     (propTrendStackShort ? 20.0 : 0.0) +
+     (trendShortOK ? 10.0 : 0.0) +
+     (propPrimaryShort ? 10.0 : 0.0) +
+     (propVWAPShort ? 10.0 : 0.0) +
+     (propOBShort ? 10.0 : 0.0) +
+     (propExtensionOK ? 10.0 : 0.0) +
+     (propBodyOK ? 5.0 : 0.0) +
+     (propPullbackShort ? 5.0 : 0.0)
+
+propBuyRaw =
+     barCloseOK and longSignal and
+     propScoreLong >= propThreshold and
+     propTrendStackLong and propPrimaryLong and propVWAPLong and propOBLong and
+     propExtensionOK and propBodyOK
+
+propSellRaw =
+     barCloseOK and shortSignal and
+     propScoreShort >= propThreshold and
+     propTrendStackShort and propPrimaryShort and propVWAPShort and propOBShort and
+     propExtensionOK and propBodyOK
+
+aPlusBuy =
+     propBuyRaw and
+     propScoreLong >= aPlusThreshold and
+     propMomentumLong and
+     (pullawayLong or dotConfirmLong or engulfLong)
+
+aPlusSell =
+     propSellRaw and
+     propScoreShort >= aPlusThreshold and
+     propMomentumShort and
+     (pullawayShort or dotConfirmShort or engulfShort)
+
+propBuy  = propBuyRaw and not aPlusBuy
+propSell = propSellRaw and not aPlusSell
+
+propBuySetup  = aPlusBuy ? "A+ BUY" : propBuy ? "PROP BUY" : "PROP BUY"
+propSellSetup = aPlusSell ? "A+ SELL" : propSell ? "PROP SELL" : "PROP SELL"
+
+
+// =====================================================================
+// 6. RISK CALCULATIONS
+// =====================================================================
+
+tickBuffer = bufferTicks * syminfo.mintick
+
+longSL_signal = low - tickBuffer
+longRisk_signal = close - longSL_signal
+longTP_signal = close + longRisk_signal * rrTarget
+
+shortSL_signal = high + tickBuffer
+shortRisk_signal = shortSL_signal - close
+shortTP_signal = close - shortRisk_signal * rrTarget
+
+longSL_fixed = close - fixedSLPoints
+longTP_fixed = close + fixedTPPoints
+shortSL_fixed = close + fixedSLPoints
+shortTP_fixed = close - fixedTPPoints
+
+longSL = riskMode == "Fixed Points" ? longSL_fixed : longSL_signal
+longTP = riskMode == "Fixed Points" ? longTP_fixed : longTP_signal
+shortSL = riskMode == "Fixed Points" ? shortSL_fixed : shortSL_signal
+shortTP = riskMode == "Fixed Points" ? shortTP_fixed : shortTP_signal
+
+
+// =====================================================================
+// 7. VISUALS
+// =====================================================================
+
+plot(showPrimarySMA ? primarySMA : na, "Primary SMA", color=primarySlopeUp ? color.lime : color.red, linewidth=2)
+plot(showTrendSMA ? trendSMA : na, "200 SMA", color=color.new(color.red, 15), linewidth=2)
+plot(showVWAP ? vwapValue : na, "VWAP", color=color.new(color.blue, 0), linewidth=1)
+
+plotshape(showDots and greenDot, title="Green Dot - Standard Bullish", style=shape.circle,
+     location=location.belowbar, color=color.lime, size=size.tiny)
+
+plotshape(showDots and whiteDot, title="White Dot - Early Bullish", style=shape.circle,
+     location=location.belowbar, color=color.white, size=size.tiny)
+
+plotshape(showDots and redDot, title="Red Dot - Standard Bearish", style=shape.circle,
+     location=location.abovebar, color=color.red, size=size.tiny)
+
+plotshape(showDots and purpleDot, title="Purple Dot - Early Bearish", style=shape.circle,
+     location=location.abovebar, color=color.purple, size=size.tiny)
+
+bullPullCandle = low > primarySMA and greenDot
+bearPullCandle = high < primarySMA and redDot
+counterTop = close < open and primarySlopeUp and close > primarySMA
+counterBottom = close > open and primarySlopeDown and close < primarySMA
+
+color candleCol = na
+candleCol :=
+     bullPullCandle ? color.new(color.lime, 0) :
+     bearPullCandle ? color.new(color.fuchsia, 0) :
+     counterTop ? color.new(color.orange, 0) :
+     counterBottom ? color.new(color.blue, 0) :
+     close >= primarySMA ? color.new(color.green, 0) :
+     close < primarySMA ? color.new(color.red, 0) :
+     na
+
+barcolor(showCandleColors ? candleCol : na)
+
+bgcolor(showBackground and obBias == 1 ? color.new(color.lime, 94) :
+     showBackground and obBias == -1 ? color.new(color.red, 94) : na)
+
+
+// =====================================================================
+// 8. SIGNAL LABELS + RISK LINES
+// =====================================================================
+
+if showSignalLabels and longSignal
+    label.new(bar_index, low, showSetupLabels ? longSetup : "BUY",
+         style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.small)
+
+if showSignalLabels and shortSignal
+    label.new(bar_index, high, showSetupLabels ? shortSetup : "SELL",
+         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+if showPropLabels and propBuy
+    label.new(bar_index, low, "PROP BUY\n" + str.tostring(propScoreLong, "#") + "%",
+         style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=propLabelSize)
+
+if showPropLabels and propSell
+    label.new(bar_index, high, "PROP SELL\n" + str.tostring(propScoreShort, "#") + "%",
+         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=propLabelSize)
+
+if showPropLabels and aPlusBuy
+    label.new(bar_index, low, "A+ BUY\n" + str.tostring(propScoreLong, "#") + "%",
+         style=label.style_label_up, color=color.new(color.yellow, 0), textcolor=color.black, size=propLabelSize)
+
+if showPropLabels and aPlusSell
+    label.new(bar_index, high, "A+ SELL\n" + str.tostring(propScoreShort, "#") + "%",
+         style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, size=propLabelSize)
+
+if showRiskLines and longSignal
+    line.new(bar_index, longTP, bar_index + riskLineBars, longTP, xloc=xloc.bar_index,
+         color=color.new(color.lime, 0), style=line.style_dashed, width=1)
+    line.new(bar_index, longSL, bar_index + riskLineBars, longSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_dashed, width=1)
+    label.new(bar_index + riskLineBars, longTP, "TP " + str.tostring(longTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, longSL, "SL " + str.tostring(longSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+if showRiskLines and shortSignal
+    line.new(bar_index, shortTP, bar_index + riskLineBars, shortTP, xloc=xloc.bar_index,
+         color=color.new(color.lime, 0), style=line.style_dashed, width=1)
+    line.new(bar_index, shortSL, bar_index + riskLineBars, shortSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_dashed, width=1)
+    label.new(bar_index + riskLineBars, shortTP, "TP " + str.tostring(shortTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, shortSL, "SL " + str.tostring(shortSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+
+if showPropRiskLines and (propBuy or aPlusBuy)
+    line.new(bar_index, longTP, bar_index + riskLineBars, longTP, xloc=xloc.bar_index,
+         color=color.new(color.yellow, 0), style=line.style_solid, width=2)
+    line.new(bar_index, longSL, bar_index + riskLineBars, longSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_solid, width=2)
+    label.new(bar_index + riskLineBars, longTP, propBuySetup + " TP " + str.tostring(longTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.yellow, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, longSL, propBuySetup + " SL " + str.tostring(longSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+if showPropRiskLines and (propSell or aPlusSell)
+    line.new(bar_index, shortTP, bar_index + riskLineBars, shortTP, xloc=xloc.bar_index,
+         color=color.new(color.yellow, 0), style=line.style_solid, width=2)
+    line.new(bar_index, shortSL, bar_index + riskLineBars, shortSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_solid, width=2)
+    label.new(bar_index + riskLineBars, shortTP, propSellSetup + " TP " + str.tostring(shortTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.yellow, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, shortSL, propSellSetup + " SL " + str.tostring(shortSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+
+// =====================================================================
+// 9. SESSION BOXES
+// =====================================================================
+
+inAsia = showSessions and not na(time(timeframe.period, asiaSession, sessionTZ))
+inEurope = showSessions and not na(time(timeframe.period, europeSession, sessionTZ))
+inNY = showSessions and not na(time(timeframe.period, nySession, sessionTZ))
+
+wasAsia = bar_index > 0 ? inAsia[1] : false
+wasEurope = bar_index > 0 ? inEurope[1] : false
+wasNY = bar_index > 0 ? inNY[1] : false
+
+startAsia = inAsia and not wasAsia
+startEurope = inEurope and not wasEurope
+startNY = inNY and not wasNY
+
+var box asiaBox = na
+var box europeBox = na
+var box nyBox = na
+var float asiaHi = na
+var float asiaLo = na
+var float europeHi = na
+var float europeLo = na
+var float nyHi = na
+var float nyLo = na
+
+if startAsia
+    asiaHi := high
+    asiaLo := low
+    asiaBox := box.new(bar_index, asiaHi, bar_index + sessExtendBars, asiaLo,
+         xloc=xloc.bar_index, bgcolor=color.new(color.yellow, 88), border_color=color.new(color.yellow, 55))
+else if inAsia
+    asiaHi := math.max(asiaHi, high)
+    asiaLo := math.min(asiaLo, low)
+    if not na(asiaBox)
+        box.set_top(asiaBox, asiaHi)
+        box.set_bottom(asiaBox, asiaLo)
+        box.set_right(asiaBox, bar_index + sessExtendBars)
+
+if startEurope
+    europeHi := high
+    europeLo := low
+    europeBox := box.new(bar_index, europeHi, bar_index + sessExtendBars, europeLo,
+         xloc=xloc.bar_index, bgcolor=color.new(color.blue, 90), border_color=color.new(color.blue, 60))
+else if inEurope
+    europeHi := math.max(europeHi, high)
+    europeLo := math.min(europeLo, low)
+    if not na(europeBox)
+        box.set_top(europeBox, europeHi)
+        box.set_bottom(europeBox, europeLo)
+        box.set_right(europeBox, bar_index + sessExtendBars)
+
+if startNY
+    nyHi := high
+    nyLo := low
+    nyBox := box.new(bar_index, nyHi, bar_index + sessExtendBars, nyLo,
+         xloc=xloc.bar_index, bgcolor=color.new(color.green, 91), border_color=color.new(color.green, 60))
+else if inNY
+    nyHi := math.max(nyHi, high)
+    nyLo := math.min(nyLo, low)
+    if not na(nyBox)
+        box.set_top(nyBox, nyHi)
+        box.set_bottom(nyBox, nyLo)
+        box.set_right(nyBox, bar_index + sessExtendBars)
+
+
+// =====================================================================
+// 10. VWAP LABEL
+// =====================================================================
+
+var label vwapLabel = na
+
+if showVWAPLabel and barstate.islast and not na(vwapValue)
+    if not na(vwapLabel)
+        label.delete(vwapLabel)
+    vwapLabel := label.new(bar_index, vwapValue, "VWAP\n" + str.tostring(vwapValue, format.mintick),
+         style=label.style_label_left, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
+
+
+// =====================================================================
+// 11. CONTINUITY TABLE
+// =====================================================================
+
+f_pos(_p) =>
+    _p == "Top Left" ? position.top_left :
+     _p == "Bottom Right" ? position.bottom_right :
+     _p == "Bottom Left" ? position.bottom_left :
+     position.top_right
+
+var table wrTable = table.new(f_pos(tablePosition), 3, 10, border_width=1)
+
+etHour = hour(time, "America/New_York")
+tfWarn = warnHigherTF and timeframe.isintraday and timeframe.multiplier > 1
+
+tickerUpper = str.upper(syminfo.ticker)
+isGold = str.contains(tickerUpper, "GC") or str.contains(tickerUpper, "MGC") or str.contains(tickerUpper, "XAU")
+marketName = isGold ? "GC" : "NQ"
+
+float pullWR = switch etHour
+    3  => 72.0
+    4  => 78.0
+    5  => 69.0
+    6  => 82.0
+    7  => 73.0
+    9  => 62.0
+    10 => 65.0
+    12 => 78.0
+    13 => 79.0
+    18 => 71.6
+    19 => 77.5
+    => 68.0
+
+float dotWR = switch etHour
+    3  => 70.0
+    4  => 74.0
+    5  => 66.0
+    6  => 76.0
+    7  => 70.0
+    9  => 61.0
+    10 => 63.0
+    12 => 71.0
+    13 => 72.0
+    18 => 74.7
+    19 => 71.8
+    => 66.0
+
+float greenWR = switch etHour
+    18 => 70.6
+    19 => 69.3
+    12 => 71.5
+    13 => 73.0
+    => 67.0
+
+float redWR = switch etHour
+    18 => 69.8
+    19 => 79.7
+    12 => 73.5
+    13 => 76.0
+    => 68.0
+
+float bullEngWR = switch etHour
+    18 => 71.4
+    19 => 71.6
+    12 => 72.5
+    13 => 74.0
+    => 69.0
+
+float bearEngWR = switch etHour
+    18 => 65.9
+    19 => 87.3
+    12 => 76.0
+    13 => 78.0
+    => 70.0
+
+if isGold
+    pullWR := pullWR - 1.0
+    dotWR := dotWR + 1.5
+    greenWR := greenWR + 0.5
+    redWR := redWR + 0.5
+
+breakeven = 70.0
+pullDelta = pullWR - breakeven
+dotDelta = dotWR - breakeven
+greenDelta = greenWR - breakeven
+redDelta = redWR - breakeven
+bullDelta = bullEngWR - breakeven
+bearDelta = bearEngWR - breakeven
+
+strongContinuity = pullWR >= breakeven and dotWR >= breakeven
+someContinuity = pullWR >= breakeven or dotWR >= breakeven
+
+continuityText = strongContinuity ? "Strong Continuity" : someContinuity ? "Some Continuity" : "Discontinuity"
+continuityColor = strongContinuity ? color.new(color.green, 0) : someContinuity ? color.new(color.orange, 0) : color.new(color.red, 0)
+
+f_fmtPct(x) =>
+    str.tostring(x, "#.0") + "%"
+
+f_delta(x) =>
+    x >= 0 ? "+" + str.tostring(x, "#.0") : str.tostring(x, "#.0")
+
+f_deltaColor(x) =>
+    x >= 0 ? color.new(color.lime, 0) : color.new(color.red, 0)
+
+if showWRTable and barstate.islast
+    table.clear(wrTable, 0, 0, 2, 9)
+
+    headerText = marketName + " - ET " + str.tostring(etHour) + ":00 - LIVE"
+    table.cell(wrTable, 0, 0, headerText, bgcolor=color.new(color.black, 0), text_color=color.white, text_size=size.small)
+    table.cell(wrTable, 1, 0, "", bgcolor=color.new(color.black, 0), text_color=color.white, text_size=size.small)
+    table.cell(wrTable, 2, 0, continuityText, bgcolor=continuityColor, text_color=color.white, text_size=size.small)
+
+    if tfWarn
+        table.cell(wrTable, 0, 1, "WARNING", bgcolor=color.new(color.red, 0), text_color=color.white)
+        table.cell(wrTable, 1, 1, "Table designed for 1m", bgcolor=color.new(color.red, 0), text_color=color.white)
+        table.cell(wrTable, 2, 1, "Use caution", bgcolor=color.new(color.red, 0), text_color=color.white)
+    else
+        table.cell(wrTable, 0, 1, "CONTINUATION", bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 1, 1, tableTPText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 2, 1, tableSLText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+
+        table.cell(wrTable, 0, 2, "Pullaway", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 2, f_fmtPct(pullWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 2, f_delta(pullDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(pullDelta))
+
+        table.cell(wrTable, 0, 3, "Dot Confirm", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 3, f_fmtPct(dotWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 3, f_delta(dotDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(dotDelta))
+
+        table.cell(wrTable, 0, 4, "TOP/BOTTOM HELD", bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 1, 4, tableTPText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 2, 4, tableSLText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+
+        table.cell(wrTable, 0, 5, "Green Dot", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 5, f_fmtPct(greenWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 5, f_delta(greenDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(greenDelta))
+
+        table.cell(wrTable, 0, 6, "Red Dot", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 6, f_fmtPct(redWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 6, f_delta(redDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(redDelta))
+
+        table.cell(wrTable, 0, 7, "ENGULFING", bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 1, 7, tableTPText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+        table.cell(wrTable, 2, 7, tableSLText, bgcolor=color.new(color.blue, 0), text_color=color.white)
+
+        table.cell(wrTable, 0, 8, "Bullish", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 8, f_fmtPct(bullEngWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 8, f_delta(bullDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(bullDelta))
+
+        table.cell(wrTable, 0, 9, "Bearish", bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 1, 9, f_fmtPct(bearEngWR), bgcolor=color.new(color.black, 5), text_color=color.white)
+        table.cell(wrTable, 2, 9, f_delta(bearDelta), bgcolor=color.new(color.black, 5), text_color=f_deltaColor(bearDelta))
+
+
+// =====================================================================
+// 12. ALERTS
+// =====================================================================
+
+alertcondition(greenDot, "Green Dot", "Green Dot on {{ticker}} at {{close}}")
+alertcondition(whiteDot, "White Dot", "White Dot on {{ticker}} at {{close}}")
+alertcondition(redDot, "Red Dot", "Red Dot on {{ticker}} at {{close}}")
+alertcondition(purpleDot, "Purple Dot", "Purple Dot on {{ticker}} at {{close}}")
+
+alertcondition(longSignal, "BFF-Style BUY", "BFF-Style BUY on {{ticker}} at {{close}}")
+alertcondition(shortSignal, "BFF-Style SELL", "BFF-Style SELL on {{ticker}} at {{close}}")
+
+alertcondition(propBuy, "PROP BUY", "PROP BUY on {{ticker}} at {{close}}")
+alertcondition(propSell, "PROP SELL", "PROP SELL on {{ticker}} at {{close}}")
+alertcondition(aPlusBuy, "A+ BUY", "A+ BUY on {{ticker}} at {{close}}")
+alertcondition(aPlusSell, "A+ SELL", "A+ SELL on {{ticker}} at {{close}}")
+
+alertcondition(pullawayLong, "Pullaway BUY", "Pullaway BUY on {{ticker}} at {{close}}")
+alertcondition(pullawayShort, "Pullaway SELL", "Pullaway SELL on {{ticker}} at {{close}}")
+alertcondition(dotConfirmLong, "Dot Confirm BUY", "Dot Confirm BUY on {{ticker}} at {{close}}")
+alertcondition(dotConfirmShort, "Dot Confirm SELL", "Dot Confirm SELL on {{ticker}} at {{close}}")
+alertcondition(engulfLong, "Engulfing BUY", "Engulfing BUY on {{ticker}} at {{close}}")
+alertcondition(engulfShort, "Engulfing SELL", "Engulfing SELL on {{ticker}} at {{close}}")
+
+alertcondition(newBullOB, "New Bullish Order Block", "New Bullish Order Block / Buy Zone on {{ticker}} at {{close}}")
+alertcondition(newBearOB, "New Bearish Order Block", "New Bearish Order Block / Sell Zone on {{ticker}} at {{close}}")
+
+runtimeNormalLong = longSignal and not propBuy and not aPlusBuy
+runtimeNormalShort = shortSignal and not propSell and not aPlusSell
+
+if enableRuntimeAlerts and aPlusBuy
+    string msgAPlusBuy = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"buy\",\"setup\":\"A+ BUY\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"score\":" + str.tostring(propScoreLong, "#") +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(longSL, format.mintick) +
+         ",\"tp\":" + str.tostring(longTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgAPlusBuy, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and aPlusSell
+    string msgAPlusSell = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"sell\",\"setup\":\"A+ SELL\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"score\":" + str.tostring(propScoreShort, "#") +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(shortSL, format.mintick) +
+         ",\"tp\":" + str.tostring(shortTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgAPlusSell, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and propBuy
+    string msgPropBuy = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"buy\",\"setup\":\"PROP BUY\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"score\":" + str.tostring(propScoreLong, "#") +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(longSL, format.mintick) +
+         ",\"tp\":" + str.tostring(longTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgPropBuy, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and propSell
+    string msgPropSell = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"sell\",\"setup\":\"PROP SELL\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"score\":" + str.tostring(propScoreShort, "#") +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(shortSL, format.mintick) +
+         ",\"tp\":" + str.tostring(shortTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgPropSell, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and runtimeNormalLong
+    string msgLong = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"buy\",\"setup\":\"" + longSetup +
+         "\",\"qty\":" + str.tostring(webhookQty) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(longSL, format.mintick) +
+         ",\"tp\":" + str.tostring(longTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgLong, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and runtimeNormalShort
+    string msgShort = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"sell\",\"setup\":\"" + shortSetup +
+         "\",\"qty\":" + str.tostring(webhookQty) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(shortSL, format.mintick) +
+         ",\"tp\":" + str.tostring(shortTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgShort, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and newBullOB
+    string msgBullOB = "{\"symbol\":\"" + syminfo.ticker +
+         "\",\"event\":\"new_bullish_order_block\"" +
+         ",\"bias\":\"bullish\"" +
+         ",\"zone\":\"buy_zone\"" +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"ob_top\":" + str.tostring(activeBullTop, format.mintick) +
+         ",\"ob_bottom\":" + str.tostring(activeBullBot, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgBullOB, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and newBearOB
+    string msgBearOB = "{\"symbol\":\"" + syminfo.ticker +
+         "\",\"event\":\"new_bearish_order_block\"" +
+         ",\"bias\":\"bearish\"" +
+         ",\"zone\":\"sell_zone\"" +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"ob_top\":" + str.tostring(activeBearTop, format.mintick) +
+         ",\"ob_bottom\":" + str.tostring(activeBearBot, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgBearOB, alert.freq_once_per_bar_close)
+
+
+// =====================================================================
+// 13. NEW ADDITIVE MODULES (no existing behaviour changed above)
+//     13A. GOLDEN HOUR SIGNALS  - your continuity-table win rates,
+//          turned into labels: a signal only earns GOLDEN status when
+//          its own setup's historical win rate for the CURRENT ET hour
+//          is at/above the Golden threshold (default 78%).
+//     13B. OB RETEST SIGNALS    - the proven OB gives a second entry:
+//          price returns into the active Order Block, taps it, and the
+//          candle closes back OUT of the zone in the OB direction.
+//     13C. POSITION SIZING + DAILY GUARD + PROP DASHBOARD
+// =====================================================================
+
+goldenLabelSize   = f_labelSize(goldenLabelSizeOpt)
+obRetestLabelSize = f_labelSize(obRetestLabelSizeOpt)
+
+// ----- Session filter for the NEW signals only (independent of the
+//       "Show Session Range Boxes" toggle so it always works)
+sessNYNow = not na(time(timeframe.period, nySession, sessionTZ))
+sessEUNow = not na(time(timeframe.period, europeSession, sessionTZ))
+newSigSessionOK =
+     newSigSession == "All Sessions" ? true :
+     newSigSession == "NY Only" ? sessNYNow :
+     sessEUNow or sessNYNow
+
+// ---------------------------------------------------------------------
+// 13A. GOLDEN HOUR SIGNALS
+// The win rate used is the one belonging to the exact setup that fired,
+// at the current ET hour (e.g. Bearish Engulfing at 19:00 ET = 87.3%).
+// ---------------------------------------------------------------------
+
+float goldenLongWR = 0.0
+if pullawayLong
+    goldenLongWR := math.max(goldenLongWR, pullWR)
+if dotConfirmLong
+    goldenLongWR := math.max(goldenLongWR, dotWR)
+if engulfLong
+    goldenLongWR := math.max(goldenLongWR, bullEngWR)
+
+float goldenShortWR = 0.0
+if pullawayShort
+    goldenShortWR := math.max(goldenShortWR, pullWR)
+if dotConfirmShort
+    goldenShortWR := math.max(goldenShortWR, dotWR)
+if engulfShort
+    goldenShortWR := math.max(goldenShortWR, bearEngWR)
+
+goldenBuy  = showGoldenLabels and longSignal  and newSigSessionOK and goldenLongWR  >= goldenThreshold and barCloseOK
+goldenSell = showGoldenLabels and shortSignal and newSigSessionOK and goldenShortWR >= goldenThreshold and barCloseOK
+
+if goldenBuy
+    label.new(bar_index, low, "★ GOLDEN BUY\n" + str.tostring(goldenLongWR, "#.#") + "% hist WR",
+         style=label.style_label_up, color=color.new(color.aqua, 0), textcolor=color.black, size=goldenLabelSize)
+
+if goldenSell
+    label.new(bar_index, high, "★ GOLDEN SELL\n" + str.tostring(goldenShortWR, "#.#") + "% hist WR",
+         style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white, size=goldenLabelSize)
+
+// ---------------------------------------------------------------------
+// 13B. OB RETEST SIGNALS
+// Fires once per Order Block: the zone must be touched, then a candle
+// closes back beyond the zone edge in the OB direction (rejection).
+// ---------------------------------------------------------------------
+
+var bool bullOBTouched  = false
+var bool bullRetestUsed = false
+var bool bearOBTouched  = false
+var bool bearRetestUsed = false
+
+if newBullOB
+    bullOBTouched  := false
+    bullRetestUsed := false
+
+if newBearOB
+    bearOBTouched  := false
+    bearRetestUsed := false
+
+if bullTapped
+    bullOBTouched := true
+
+if bearTapped
+    bearOBTouched := true
+
+obRetestTrendLongOK  = not obRetestUseTrend or trendLongOK
+obRetestTrendShortOK = not obRetestUseTrend or trendShortOK
+
+obRetestBuy =
+     showOBRetest and obBias == 1 and bullOBTouched and not bullRetestUsed and
+     not na(activeBullTop) and close > open and close > activeBullTop and
+     obRetestTrendLongOK and newSigSessionOK and barCloseOK
+
+obRetestSell =
+     showOBRetest and obBias == -1 and bearOBTouched and not bearRetestUsed and
+     not na(activeBearBot) and close < open and close < activeBearBot and
+     obRetestTrendShortOK and newSigSessionOK and barCloseOK
+
+if obRetestBuy
+    bullRetestUsed := true
+    label.new(bar_index, low, "OB RETEST\nBUY",
+         style=label.style_label_up, color=color.new(color.teal, 0), textcolor=color.white, size=obRetestLabelSize)
+
+if obRetestSell
+    bearRetestUsed := true
+    label.new(bar_index, high, "OB RETEST\nSELL",
+         style=label.style_label_down, color=color.new(color.fuchsia, 0), textcolor=color.white, size=obRetestLabelSize)
+
+// ----- TP / SL lines for the new signals (re-uses your existing risk model)
+
+if showNewRiskLines and (goldenBuy or obRetestBuy)
+    line.new(bar_index, longTP, bar_index + riskLineBars, longTP, xloc=xloc.bar_index,
+         color=color.new(color.aqua, 0), style=line.style_dotted, width=2)
+    line.new(bar_index, longSL, bar_index + riskLineBars, longSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_dotted, width=2)
+    label.new(bar_index + riskLineBars, longTP, "TP " + str.tostring(longTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.aqua, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, longSL, "SL " + str.tostring(longSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+if showNewRiskLines and (goldenSell or obRetestSell)
+    line.new(bar_index, shortTP, bar_index + riskLineBars, shortTP, xloc=xloc.bar_index,
+         color=color.new(color.aqua, 0), style=line.style_dotted, width=2)
+    line.new(bar_index, shortSL, bar_index + riskLineBars, shortSL, xloc=xloc.bar_index,
+         color=color.new(color.red, 0), style=line.style_dotted, width=2)
+    label.new(bar_index + riskLineBars, shortTP, "TP " + str.tostring(shortTP, format.mintick),
+         style=label.style_label_left, color=color.new(color.aqua, 0), textcolor=color.black, size=size.tiny)
+    label.new(bar_index + riskLineBars, shortSL, "SL " + str.tostring(shortSL, format.mintick),
+         style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+// ---------------------------------------------------------------------
+// 13C. POSITION SIZING + DAILY SIGNAL GUARD + PROP DASHBOARD
+// ---------------------------------------------------------------------
+
+pointValue = syminfo.pointvalue
+longRiskPts  = riskMode == "Fixed Points" ? fixedSLPoints : math.max(close - longSL_signal, syminfo.mintick)
+shortRiskPts = riskMode == "Fixed Points" ? fixedSLPoints : math.max(shortSL_signal - close, syminfo.mintick)
+riskPerContractLong  = longRiskPts * pointValue
+riskPerContractShort = shortRiskPts * pointValue
+int contractsLong  = riskPerContractLong  > 0 ? int(math.floor(riskPerTrade / riskPerContractLong))  : 0
+int contractsShort = riskPerContractShort > 0 ? int(math.floor(riskPerTrade / riskPerContractShort)) : 0
+
+var int dayQualityCount = 0
+if timeframe.change("1D")
+    dayQualityCount := 0
+
+qualitySignalNow = (propBuy or propSell or aPlusBuy or aPlusSell or goldenBuy or goldenSell or obRetestBuy or obRetestSell) and barstate.isconfirmed
+if qualitySignalNow
+    dayQualityCount += 1
+
+dailyLimitHit = dayQualityCount >= maxTradesPerDay
+
+var table propDash = table.new(f_pos(dashPosition), 2, 9, border_width=1)
+
+if showPropDash and barstate.islast
+    table.clear(propDash, 0, 0, 1, 8)
+
+    biasText = obBias == 1 ? "BULLISH" : obBias == -1 ? "BEARISH" : "NEUTRAL"
+    biasCol  = obBias == 1 ? color.new(color.green, 0) : obBias == -1 ? color.new(color.red, 0) : color.new(color.gray, 0)
+    sessText = sessNYNow ? "NY OPEN" : sessEUNow ? "LONDON" : "OFF-PEAK"
+    sessCol  = sessNYNow or sessEUNow ? color.new(color.green, 0) : color.new(color.gray, 0)
+
+    table.cell(propDash, 0, 0, "PROP DASH", bgcolor=color.new(color.black, 0), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 0, sessText, bgcolor=sessCol, text_color=color.white, text_size=size.small)
+
+    table.cell(propDash, 0, 1, "OB Bias", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 1, biasText, bgcolor=biasCol, text_color=color.white, text_size=size.small)
+
+    table.cell(propDash, 0, 2, "ATR(" + str.tostring(atrLen) + ")", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 2, str.tostring(atr, format.mintick), bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+
+    table.cell(propDash, 0, 3, "VWAP Dist", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 3, str.tostring(close - vwapValue, format.mintick), bgcolor=color.new(color.black, 5),
+         text_color=close >= vwapValue ? color.new(color.lime, 0) : color.new(color.red, 0), text_size=size.small)
+
+    table.cell(propDash, 0, 4, "Risk/Trade", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 4, "$" + str.tostring(riskPerTrade, "#"), bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+
+    table.cell(propDash, 0, 5, "Long Size", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 5, str.tostring(contractsLong) + " @ " + str.tostring(longRiskPts, "#.##") + "pt SL",
+         bgcolor=color.new(color.black, 5), text_color=color.new(color.lime, 0), text_size=size.small)
+
+    table.cell(propDash, 0, 6, "Short Size", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 6, str.tostring(contractsShort) + " @ " + str.tostring(shortRiskPts, "#.##") + "pt SL",
+         bgcolor=color.new(color.black, 5), text_color=color.new(color.red, 0), text_size=size.small)
+
+    table.cell(propDash, 0, 7, "Signals Today", bgcolor=color.new(color.black, 5), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 7, str.tostring(dayQualityCount) + " / " + str.tostring(maxTradesPerDay),
+         bgcolor=color.new(color.black, 5), text_color=dailyLimitHit ? color.new(color.red, 0) : color.new(color.lime, 0), text_size=size.small)
+
+    table.cell(propDash, 0, 8, dailyLimitHit ? "DAILY LIMIT HIT" : "OK TO TRADE",
+         bgcolor=dailyLimitHit ? color.new(color.red, 0) : color.new(color.green, 0), text_color=color.white, text_size=size.small)
+    table.cell(propDash, 1, 8, dailyLimitHit ? "STAND DOWN" : "FOLLOW PLAN",
+         bgcolor=dailyLimitHit ? color.new(color.red, 0) : color.new(color.green, 0), text_color=color.white, text_size=size.small)
+
+// ----- Alerts for the new signals
+
+alertcondition(goldenBuy, "GOLDEN BUY", "GOLDEN BUY (hour win-rate boost) on {{ticker}} at {{close}}")
+alertcondition(goldenSell, "GOLDEN SELL", "GOLDEN SELL (hour win-rate boost) on {{ticker}} at {{close}}")
+alertcondition(obRetestBuy, "OB RETEST BUY", "Order Block retest BUY on {{ticker}} at {{close}}")
+alertcondition(obRetestSell, "OB RETEST SELL", "Order Block retest SELL on {{ticker}} at {{close}}")
+
+if enableRuntimeAlerts and goldenBuy
+    string msgGoldenBuy = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"buy\",\"setup\":\"GOLDEN BUY\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"hist_wr\":" + str.tostring(goldenLongWR, "#.#") +
+         ",\"contracts\":" + str.tostring(contractsLong) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(longSL, format.mintick) +
+         ",\"tp\":" + str.tostring(longTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgGoldenBuy, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and goldenSell
+    string msgGoldenSell = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"sell\",\"setup\":\"GOLDEN SELL\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"hist_wr\":" + str.tostring(goldenShortWR, "#.#") +
+         ",\"contracts\":" + str.tostring(contractsShort) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(shortSL, format.mintick) +
+         ",\"tp\":" + str.tostring(shortTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgGoldenSell, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and obRetestBuy
+    string msgRetestBuy = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"buy\",\"setup\":\"OB RETEST BUY\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"contracts\":" + str.tostring(contractsLong) +
+         ",\"ob_top\":" + str.tostring(activeBullTop, format.mintick) +
+         ",\"ob_bottom\":" + str.tostring(activeBullBot, format.mintick) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(longSL, format.mintick) +
+         ",\"tp\":" + str.tostring(longTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgRetestBuy, alert.freq_once_per_bar_close)
+
+if enableRuntimeAlerts and obRetestSell
+    string msgRetestSell = "{\"symbol\":\"" + syminfo.ticker + "\",\"action\":\"sell\",\"setup\":\"OB RETEST SELL\"" +
+         ",\"qty\":" + str.tostring(webhookQty) +
+         ",\"contracts\":" + str.tostring(contractsShort) +
+         ",\"ob_top\":" + str.tostring(activeBearTop, format.mintick) +
+         ",\"ob_bottom\":" + str.tostring(activeBearBot, format.mintick) +
+         ",\"price\":" + str.tostring(close, format.mintick) +
+         ",\"sl\":" + str.tostring(shortSL, format.mintick) +
+         ",\"tp\":" + str.tostring(shortTP, format.mintick) +
+         ",\"time\":\"{{time}}\"}"
+    alert(msgRetestSell, alert.freq_once_per_bar_close)
