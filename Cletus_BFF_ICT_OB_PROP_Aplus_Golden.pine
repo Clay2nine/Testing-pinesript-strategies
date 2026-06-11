@@ -978,11 +978,11 @@ goldenBuy  = showGoldenLabels and longSignal  and newSigSessionOK and goldenLong
 goldenSell = showGoldenLabels and shortSignal and newSigSessionOK and goldenShortWR >= goldenThreshold and barCloseOK
 
 if goldenBuy
-    label.new(bar_index, low, "★ GOLDEN BUY\n" + str.tostring(goldenLongWR, "#.#") + "% hist WR",
+    label.new(bar_index, low, "GOLDEN BUY\n" + str.tostring(goldenLongWR, "#.#") + "% hist WR",
          style=label.style_label_up, color=color.new(color.aqua, 0), textcolor=color.black, size=goldenLabelSize)
 
 if goldenSell
-    label.new(bar_index, high, "★ GOLDEN SELL\n" + str.tostring(goldenShortWR, "#.#") + "% hist WR",
+    label.new(bar_index, high, "GOLDEN SELL\n" + str.tostring(goldenShortWR, "#.#") + "% hist WR",
          style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white, size=goldenLabelSize)
 
 // ---------------------------------------------------------------------
