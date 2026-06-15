@@ -893,11 +893,11 @@ string domPctTxt = str.tostring(int(math.round(dominantVolPerc, 0))) + "%"
 string actPctTxt = str.tostring(int(math.round(dominantVolAPerc, 0))) + "%"
 
 string domSideTxt  = domBuy ? "DOM BUY" : "DOM SELL"
-string domArrowTxt = domBuy ? "▲" : "▼"
+string domArrowTxt = domBuy ? "^" : "v"
 string actSideTxt  = actBuy ? "ACT BUY" : "ACT SELL"
-string actArrowTxt = actBuy ? "▲" : "▼"
+string actArrowTxt = actBuy ? "^" : "v"
 
-string coachArrowTxt = coachBuyLive ? "▲" : coachSellLive ? "▼" : "▬"
+string coachArrowTxt = coachBuyLive ? "^" : coachSellLive ? "v" : "="
 string coachCoreTxt  = coachBuyLive ? "BUY" : coachSellLive ? "SELL" : "HOLD"
 
 // VC text tag
@@ -910,11 +910,11 @@ string vcActRounded = miniVCNumberMode == "Single digit"
      : str.tostring(int(math.round(dominantVolAPerc, 0)))
 
 string vcActiveState = actBuy ? (ActiveVolDisagreement ? "(+)" : "+") : (ActiveVolDisagreement ? "(-)" : "-")
-string vcFlagTxt = miniVCShowFlags ? (((highBuyVol or highSellVol or highBuyVolA or highSellVolA) ? "▲" : "") + (ActiveVolDisagreement ? "D" : "")) : ""
+string vcFlagTxt = miniVCShowFlags ? (((highBuyVol or highSellVol or highBuyVolA or highSellVolA) ? "*" : "") + (ActiveVolDisagreement ? "D" : "")) : ""
 string vcMiniTxt = (miniVCShowTag ? "VC " : "") + "[" + vcDomRounded + "|" + vcActiveState + vcActRounded + vcFlagTxt + "]"
 
 // *** Prop filter status appended to ACT row ***
-string propStatusTxt = i_propEnable ? (" | PROP:" + (bodyFilterPass ? "B✓" : "B✗") + (atrExpandPass ? "V✓" : "V✗") + (emaTouchPass ? "E✓" : "E✗") + (htfBiasPassLong or htfBiasPassShort ? "H✓" : "H✗")) : ""
+string propStatusTxt = i_propEnable ? (" | PROP:" + (bodyFilterPass ? "B+" : "Bx") + (atrExpandPass ? "V+" : "Vx") + (emaTouchPass ? "E+" : "Ex") + (htfBiasPassLong or htfBiasPassShort ? "H+" : "Hx")) : ""
 
 string rowActBase   = tagPad + actSideTxt + " " + actArrowTxt + " " + actPctTxt + " [" + styleTag + "]" + propStatusTxt
 string rowTotalBase = tagPad + "TOTAL VOL " + fmt2(totalVolNorm) + " | RV " + fmt2(relVolRatio) + "x"
@@ -923,7 +923,7 @@ string rowAIBase    = tagPad + "AI prob (up) % " + fmt2(aiProb)
 string rowCoachBase = tagPad + "COACH " + coachCoreTxt + " " + coachArrowTxt + " " + domPctTxt + " (" + sigLiveName + ")"
 
 // *** NEW: PROP column row text ***
-string propArrowTxt = propBuySig ? "▲" : propSellSig ? "▼" : "▬"
+string propArrowTxt = propBuySig ? "^" : propSellSig ? "v" : "="
 string rowPropBase  = tagPad + "PROP " + propGradeTxt + " " + propArrowTxt + " " + str.tostring(int(math.round(propShownPct, 0))) + "% (req " + str.tostring(i_propBuyReqPct) + "/A+ " + str.tostring(i_propAPlusReqPct) + ")"
 
 string stateTxt = "STATE FLAT"
