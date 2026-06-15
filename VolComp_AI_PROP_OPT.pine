@@ -1013,50 +1013,51 @@ else if panelPos == "Bottom Center"
 else if panelPos == "Bottom Right"
     pos := position.bottom_right
 
-// Row count: 6 base rows + 1 PROP row (when column enabled)
-int panelRows = i_propColOn ? 7 : 6
+// Row order — PROP placed at the TOP, directly UNDER the ACT buy/sell row, so the
+// prop BUY/SELL/SKIP call is the first thing you read (no scanning to the bottom).
+// TOTAL VOL row removed by request. Order: ACT -> PROP -> DOM -> AI -> COACH -> STATE
+int rAct = 0
+int rPrp = i_propColOn ? 1 : -1
+int rDom = i_propColOn ? 2 : 1
+int rAi  = i_propColOn ? 3 : 2
+int rCch = i_propColOn ? 4 : 3
+int rSta = i_propColOn ? 5 : 4
 
 var table t = na
 if panelMode == "Anchored (Table)" and na(t)
-    t := table.new(pos, showStripes ? 2 : 1, 7, border_width=0)
+    t := table.new(pos, showStripes ? 2 : 1, 6, border_width=0)
 
 ts = txtSize()
 string stripeChar = " "
 
 if showPanel and panelMode == "Anchored (Table)" and barstate.islast and not na(t)
     if showStripes
-        table.cell(t, 0, 0, stripeChar, text_color=color.new(color.white, 100), bgcolor=actStripe,      text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, 0, rowAct,     text_color=color.white,               bgcolor=actBg,          text_size=ts, text_halign=text.align_left)
-
-        table.cell(t, 0, 1, stripeChar, text_color=color.new(color.white, 100), bgcolor=totalStripe,    text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, 1, rowTotal,   text_color=color.white,               bgcolor=totalBg,        text_size=ts, text_halign=text.align_left)
-
-        table.cell(t, 0, 2, stripeChar, text_color=color.new(color.white, 100), bgcolor=domStripe,      text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, 2, rowDom,     text_color=color.white,               bgcolor=domBg,          text_size=ts, text_halign=text.align_left)
-
-        table.cell(t, 0, 3, stripeChar, text_color=color.new(color.white, 100), bgcolor=aiStripe,       text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, 3, rowAI,      text_color=color.white,               bgcolor=aiBg,           text_size=ts, text_halign=text.align_left)
-
-        table.cell(t, 0, 4, stripeChar, text_color=color.new(color.white, 100), bgcolor=coachStripe,    text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, 4, rowCoach,   text_color=coachTc,                   bgcolor=coachBg,        text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rAct, stripeChar, text_color=color.new(color.white, 100), bgcolor=actStripe, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, rAct, rowAct,     text_color=color.white,                bgcolor=actBg,     text_size=ts, text_halign=text.align_left)
 
         if i_propColOn
-            table.cell(t, 0, 5, stripeChar, text_color=color.new(color.white, 100), bgcolor=propStripe, text_size=ts, text_halign=text.align_left)
-            table.cell(t, 1, 5, rowProp,    text_color=propTc,                    bgcolor=propBg,      text_size=ts, text_halign=text.align_left)
+            table.cell(t, 0, rPrp, stripeChar, text_color=color.new(color.white, 100), bgcolor=propStripe, text_size=ts, text_halign=text.align_left)
+            table.cell(t, 1, rPrp, rowProp,    text_color=propTc,                     bgcolor=propBg,     text_size=ts, text_halign=text.align_left)
 
-        int stateRow = i_propColOn ? 6 : 5
-        table.cell(t, 0, stateRow, stripeChar, text_color=color.new(color.white, 100), bgcolor=stateStripeCol, text_size=ts, text_halign=text.align_left)
-        table.cell(t, 1, stateRow, rowState,   text_color=stateTc,                   bgcolor=stateBg,        text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rDom, stripeChar, text_color=color.new(color.white, 100), bgcolor=domStripe, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, rDom, rowDom,     text_color=color.white,                bgcolor=domBg,     text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, rAi, stripeChar, text_color=color.new(color.white, 100), bgcolor=aiStripe, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, rAi, rowAI,      text_color=color.white,                bgcolor=aiBg,     text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, rCch, stripeChar, text_color=color.new(color.white, 100), bgcolor=coachStripe, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, rCch, rowCoach,   text_color=coachTc,                    bgcolor=coachBg,     text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, rSta, stripeChar, text_color=color.new(color.white, 100), bgcolor=stateStripeCol, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, rSta, rowState,   text_color=stateTc,                    bgcolor=stateBg,        text_size=ts, text_halign=text.align_left)
     else
-        table.cell(t, 0, 0, rowAct,   text_color=color.white, bgcolor=actBg,   text_size=ts, text_halign=text.align_left)
-        table.cell(t, 0, 1, rowTotal, text_color=color.white, bgcolor=totalBg, text_size=ts, text_halign=text.align_left)
-        table.cell(t, 0, 2, rowDom,   text_color=color.white, bgcolor=domBg,   text_size=ts, text_halign=text.align_left)
-        table.cell(t, 0, 3, rowAI,    text_color=color.white, bgcolor=aiBg,    text_size=ts, text_halign=text.align_left)
-        table.cell(t, 0, 4, rowCoach, text_color=coachTc,     bgcolor=coachBg, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rAct, rowAct, text_color=color.white, bgcolor=actBg, text_size=ts, text_halign=text.align_left)
         if i_propColOn
-            table.cell(t, 0, 5, rowProp, text_color=propTc, bgcolor=propBg, text_size=ts, text_halign=text.align_left)
-        int stateRow2 = i_propColOn ? 6 : 5
-        table.cell(t, 0, stateRow2, rowState, text_color=stateTc, bgcolor=stateBg, text_size=ts, text_halign=text.align_left)
+            table.cell(t, 0, rPrp, rowProp, text_color=propTc, bgcolor=propBg, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rDom, rowDom,   text_color=color.white, bgcolor=domBg,   text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rAi,  rowAI,    text_color=color.white, bgcolor=aiBg,    text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rCch, rowCoach, text_color=coachTc,     bgcolor=coachBg, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, rSta, rowState, text_color=stateTc,     bgcolor=stateBg, text_size=ts, text_halign=text.align_left)
 
 //=============================================================================
 // Floating panel labels — single panel only
@@ -1116,30 +1117,32 @@ if barstate.islast
         int x1_      = bar_index + float1XBars
         int xs1      = x1_ - 1
 
-        // Row stacking: Act, Tot, Dom, AI, Coach, [Prop], State
+        // Row stacking (TOTAL removed): Act, [Prop], Dom, AI, Coach, State
+        // PROP sits directly under ACT so the prop buy/sell call is read first.
         float yAct1 = baseY1
-        float yTot1 = baseY1 - gap1
-        float yDom1 = baseY1 - gap1 * 2.0
-        float yAi1  = baseY1 - gap1 * 3.0
-        float yCch1 = baseY1 - gap1 * 4.0
-        float yPrp1 = baseY1 - gap1 * 5.0
-        float ySta1 = baseY1 - gap1 * (i_propColOn ? 6.0 : 5.0)
+        float yPrp1 = baseY1 - gap1 * 1.0
+        float yDom1 = baseY1 - gap1 * (i_propColOn ? 2.0 : 1.0)
+        float yAi1  = baseY1 - gap1 * (i_propColOn ? 3.0 : 2.0)
+        float yCch1 = baseY1 - gap1 * (i_propColOn ? 4.0 : 3.0)
+        float ySta1 = baseY1 - gap1 * (i_propColOn ? 5.0 : 4.0)
         float yBottom1 = ySta1   // lowest row for replica anchoring
+
+        // TOTAL row removed by request — make sure any old total labels are gone
+        p1TotS := f_del(p1TotS)
+        p1Tot  := f_del(p1Tot)
 
         if showStripes
             p1ActS := f_upd(p1ActS, xs1, yAct1, " ", actStripe,      color.new(color.white, 100), size.tiny)
-            p1TotS := f_upd(p1TotS, xs1, yTot1, " ", totalStripe,    color.new(color.white, 100), size.tiny)
-            p1DomS := f_upd(p1DomS, xs1, yDom1, " ", domStripe,      color.new(color.white, 100), size.tiny)
-            p1AiS  := f_upd(p1AiS,  xs1, yAi1,  " ", aiStripe,       color.new(color.white, 100), size.tiny)
-            p1CchS := f_upd(p1CchS, xs1, yCch1, " ", coachStripe,    color.new(color.white, 100), size.tiny)
             if i_propColOn
                 p1PrpS := f_upd(p1PrpS, xs1, yPrp1, " ", propStripe, color.new(color.white, 100), size.tiny)
             else
                 p1PrpS := f_del(p1PrpS)
+            p1DomS := f_upd(p1DomS, xs1, yDom1, " ", domStripe,      color.new(color.white, 100), size.tiny)
+            p1AiS  := f_upd(p1AiS,  xs1, yAi1,  " ", aiStripe,       color.new(color.white, 100), size.tiny)
+            p1CchS := f_upd(p1CchS, xs1, yCch1, " ", coachStripe,    color.new(color.white, 100), size.tiny)
             p1StaS := f_upd(p1StaS, xs1, ySta1, " ", stateStripeCol, color.new(color.white, 100), size.tiny)
         else
             p1ActS := f_del(p1ActS)
-            p1TotS := f_del(p1TotS)
             p1DomS := f_del(p1DomS)
             p1AiS  := f_del(p1AiS)
             p1CchS := f_del(p1CchS)
@@ -1147,14 +1150,13 @@ if barstate.islast
             p1StaS := f_del(p1StaS)
 
         p1Act := f_upd(p1Act, x1_, yAct1, rowAct,   actBg,   color.white, ts)
-        p1Tot := f_upd(p1Tot, x1_, yTot1, rowTotal, totalBg, color.white, ts)
-        p1Dom := f_upd(p1Dom, x1_, yDom1, rowDom,   domBg,   color.white, ts)
-        p1Ai  := f_upd(p1Ai,  x1_, yAi1,  rowAI,    aiBg,    color.white, ts)
-        p1Cch := f_upd(p1Cch, x1_, yCch1, rowCoach, coachBg, coachTc,      ts)
         if i_propColOn
             p1Prp := f_upd(p1Prp, x1_, yPrp1, rowProp, propBg, propTc, ts)
         else
             p1Prp := f_del(p1Prp)
+        p1Dom := f_upd(p1Dom, x1_, yDom1, rowDom,   domBg,   color.white, ts)
+        p1Ai  := f_upd(p1Ai,  x1_, yAi1,  rowAI,    aiBg,    color.white, ts)
+        p1Cch := f_upd(p1Cch, x1_, yCch1, rowCoach, coachBg, coachTc,      ts)
         p1Sta := f_upd(p1Sta, x1_, ySta1, rowState, stateBg, stateTc,      ts)
 
         if showVCReplica
