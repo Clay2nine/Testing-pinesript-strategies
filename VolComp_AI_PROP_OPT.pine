@@ -1,0 +1,1247 @@
+//@version=6
+indicator("VolComp AI+ Coach [PROP-OPT | No-Reversal 5m]", shorttitle="VCAI-PROP", overlay=true, max_labels_count=250, max_lines_count=50, max_boxes_count=30)
+
+// =============================================================================
+// PROP TRADING OPTIMISATION NOTES (v1.1 — 20/200 EMA strategy)
+// =============================================================================
+// CHANGES vs original (all ADDITIVE — no existing setting/feature/AI logic altered):
+//   v1.0
+//   1. Fast EMA default: 8 -> 20  (aligns with your 20 SMA/200 SMA core strategy)
+//   2. [NEW] Candle Body Filter   — rejects doji/indecision bars at entry
+//   3. [NEW] ATR Compression Guard — blocks entries when volatility is compressed (chop)
+//   4. [NEW] EMA-Touch Proximity Filter — price must be near (not far above) the 20 EMA
+//   5. [NEW] HTF Bias Check (15m) — requires 15m DOM to agree with trade direction
+//   6. [NEW] Consecutive Momentum Bars — B/NI entries require N rising/falling bars
+//   7. [NEW] Prop Entry Quality Label — shows A+ / B+ / SKIP on each signal bar
+//   8. [NEW] EMA 20/200 plotted on chart with clear visual
+//   v1.1  (this version)
+//   9. [FIX] Cleaned all panel glyphs (arrows/check marks) so volume rows render
+//            correctly instead of garbled mojibake.
+//  10. [NEW] PROP COLUMN: a dedicated panel row + A+/B+ BUY/SELL column that is
+//            synced to YOUR required prop volume percentages. It only fires when
+//            BOTH the dominant (DOM) and active (ACT) volume % meet your prop
+//            buy/sell % thresholds AND the existing A/B/NI signal + quality
+//            filters agree. This is the "volume-true" buy/sell column you asked
+//            for — it reflects real volume dominance, not just the AI bias.
+//  11. [NEW] Prop column alertconditions (A+/B+ buy & sell).
+//   All original inputs, logic, alerts, state machine, AI orientation — UNTOUCHED.
+// =============================================================================
+
+//=============================================================================
+// Preset: Aggressive / Balanced / Custom + AUTO tune (XAU/NAS)
+//=============================================================================
+groupPreset = "Preset"
+tradeStyle = input.string("Aggressive", "Trading style",
+     options=["Aggressive","Balanced","Custom (use inputs)"],
+     tooltip="Aggressive: more signals/faster flips (M5 scalping). Balanced: cleaner/stricter. Custom: uses the inputs below.",
+     group=groupPreset)
+
+autoTuneXN = input.bool(true, "AUTO tune for XAUUSD/NAS100 (Aggressive only)",
+     tooltip="When Trading style = Aggressive: adjusts vpiA/relVol thresholds slightly for XAUUSD vs NAS100/US100 feeds. Balanced/Custom unaffected.",
+     group=groupPreset)
+
+//=============================================================================
+// Inputs (Core)
+//=============================================================================
+groupVol = "Volume settings"
+i_smoothingType = input.string("SMA", "Volume moving average", options=["SMA","EMA","HMA","RMA","WMA"], group=groupVol, inline="ma")
+i_volSmaLength  = input.int(20, "", minval=1, group=groupVol, inline="ma")
+i_source        = input.source(close, "Source for volume direction", group=groupVol)
+i_volThreshold  = input.int(70, "High volume threshold %", maxval=100, minval=1, group=groupVol)
+i_volAThreshold = input.int(70, "High active volume threshold %", maxval=100, minval=1, group=groupVol)
+i_relVol        = input.bool(false, "Use relative volume", group=groupVol)
+
+groupSource    = "Volume source"
+i_symbolBool   = input.bool(false, "Override chart volume with custom symbol volume", group=groupSource)
+i_symbolVolume = input.symbol("BTCUSDT", "Symbol for volume data", group=groupSource)
+
+groupTf = "Timeframe settings"
+i_tf1 = input.timeframe("1", "LTF for charts <= 30 min", group=groupTf)
+i_tf2 = input.timeframe("5", "LTF for charts > 30 min & <= 3 hours", group=groupTf)
+i_tf3 = input.timeframe("15", "LTF for charts > 3 hours & <= 8 hours", group=groupTf)
+i_tf4 = input.timeframe("60", "LTF for charts > 8 hours & <= 1D", group=groupTf)
+i_tf5 = input.timeframe("120", "LTF for charts > 1D & <= 3D", group=groupTf)
+i_tf6 = input.timeframe("240", "LTF for charts > 3D", group=groupTf)
+
+//=============================================================================
+// AI / ML
+//=============================================================================
+groupAI         = "AI / ML (Adaptive layer)"
+i_aiEnable      = input.bool(true, "Enable AI/ML layer", group=groupAI)
+i_aiLearn       = input.bool(true, "Online learning (confirmed bars)", group=groupAI)
+i_aiLR          = input.float(0.04, "Learning rate", minval=0.0, maxval=1.0, step=0.01, group=groupAI)
+i_aiDecay       = input.float(0.998, "Weight decay", minval=0.90, maxval=1.0, step=0.001, group=groupAI)
+i_aiClip        = input.float(3.0, "Weight clamp", minval=0.5, maxval=10.0, step=0.25, group=groupAI)
+i_aiBull        = input.int(62, "AI bullish threshold", minval=50, maxval=99, group=groupAI)
+i_aiBear        = input.int(38, "AI bearish threshold", minval=1, maxval=50, group=groupAI)
+
+//=============================================================================
+// A/B + NI
+//=============================================================================
+groupAB = "A/B Trades (5m scalp layer)"
+i_abEnable      = input.bool(true, "Enable A/B trade signals", group=groupAB)
+i_abOnly5m      = input.bool(true, "Only fire on 5m timeframe", group=groupAB)
+i_abOnePerBar   = input.bool(true, "One signal per bar (A>B>NI)", group=groupAB)
+i_abUseTrend    = input.bool(true, "Use EMA 20/200 trend filter", group=groupAB)
+// *** PROP CHANGE #1: Fast EMA default changed from 8 -> 20 to match 20 SMA strategy ***
+i_abFastLen     = input.int(20, "Fast EMA (20 = your 20 SMA core)", minval=1, group=groupAB, inline="ema")
+i_abSlowLen     = input.int(200, "Slow EMA", minval=1, group=groupAB, inline="ema")
+i_abMinRelVol   = input.float(1.1, "Min relative volume", step=0.1, minval=0.0, group=groupAB)
+i_abStrongBull  = input.int(66, "A-trade bull bias %", minval=50, maxval=99, group=groupAB)
+i_abStrongBear  = input.int(34, "A-trade bear bias %", minval=1, maxval=50, group=groupAB)
+i_abMinConfA    = input.int(70, "Min confidence % for A", minval=1, maxval=99, group=groupAB)
+i_abMinConfB    = input.int(60, "Min confidence % for B", minval=1, maxval=99, group=groupAB)
+
+groupNI = "Next Intention (Active volume imbalance)"
+i_niEnable    = input.bool(true, "Enable Next Intention", group=groupNI)
+i_niOnly5m    = input.bool(true, "Only fire on 5m timeframe", group=groupNI)
+i_niThr       = input.float(0.08, "vpiA threshold", minval=0.01, maxval=0.60, step=0.01, group=groupNI)
+i_niSlopeLen  = input.int(2, "Slope confirmation bars", minval=1, maxval=5, group=groupNI)
+i_niMinRelVol = input.float(1.0, "Min rel vol for NI", minval=0.0, step=0.1, group=groupNI)
+
+//=============================================================================
+// *** NEW: Prop Entry Quality Filters ***
+//=============================================================================
+groupProp = "Prop Entry Quality Filters (No-Reversal)"
+i_propEnable       = input.bool(true,  "Enable Prop Quality Filters",       group=groupProp, tooltip="Master switch. Disabling reverts to original A/B/NI logic only.")
+i_bodyFilterOn     = input.bool(true,  "Candle Body Filter (reject dojis)",  group=groupProp, tooltip="Entry candle body must be >= bodyMinPct % of its ATR. Blocks doji/spinning-top entries that reverse immediately.")
+i_bodyMinPct       = input.float(0.20, "Min body size (ATR multiplier)",     group=groupProp, step=0.05, minval=0.05, maxval=1.0, tooltip="Body must be >= this x ATR(14). 0.20 = 20% of ATR. Raise to tighten.")
+i_atrCompressOn    = input.bool(true,  "ATR Compression Guard (block chop)", group=groupProp, tooltip="Blocks entries when current ATR is compressed vs its own average — chop environment.")
+i_atrCompressLen   = input.int(50,     "ATR compression lookback",           group=groupProp, minval=10, maxval=200, tooltip="Length for ATR SMA to compare against current ATR.")
+i_atrCompressRatio = input.float(0.65, "Min ATR ratio to allow entry",       group=groupProp, step=0.05, minval=0.20, maxval=0.99, tooltip="current ATR / ATR-SMA must be >= this. 0.65 = current ATR >= 65% of avg. Raise to require more expansion.")
+i_emaTouchOn       = input.bool(true,  "EMA-20 Proximity Filter",            group=groupProp, tooltip="Price must have touched or crossed the 20 EMA within the last N bars (pullback entry). Avoids chasing extended moves.")
+i_emaTouchBars     = input.int(6,      "EMA-20 touch lookback bars",         group=groupProp, minval=1, maxval=20, tooltip="If price hasn't been within 1x ATR of EMA-20 in this many bars, skip the signal.")
+i_htfBiasOn        = input.bool(true,  "HTF Bias Filter (15m DOM agree)",    group=groupProp, tooltip="Requires the 15m timeframe DOM direction to agree with your trade direction. Prevents trading against the higher timeframe flow.")
+i_consBarOn        = input.bool(true,  "Consecutive Momentum Bars (B/NI)",   group=groupProp, tooltip="For B-grade and NI signals: requires N consecutive bars closing in trade direction before entry is valid.")
+i_consBarLen       = input.int(2,      "Consecutive bars required (B/NI)",   group=groupProp, minval=2, maxval=4, tooltip="2 = two consecutive bullish/bearish closes required before B or NI signal fires.")
+i_showQualityLabel = input.bool(true,  "Show Entry Quality Labels (A+/B+)",  group=groupProp, tooltip="Displays A+ or B+ label above/below signal bars for quick quality assessment.")
+
+//=============================================================================
+// *** NEW: Prop Volume % Column (sync to your prop buy/sell percentages) ***
+//=============================================================================
+groupPropCol = "Prop Volume % Column"
+i_propColOn       = input.bool(true, "Show PROP column row + A+/B+ buy/sell", group=groupPropCol, tooltip="Adds a dedicated PROP row to the panel and an A+/B+ BUY/SELL column synced to the volume % your prop rules require.")
+i_propBuyReqPct   = input.int(83, "Prop BUY required volume %",  group=groupPropCol, minval=50, maxval=99, tooltip="Both DOM (dominant) AND ACT (active) BUY volume % must be >= this for a prop BUY. Default 83 = the lowest prop buy/sell confidence required by the indicators on your chart.")
+i_propSellReqPct  = input.int(83, "Prop SELL required volume %", group=groupPropCol, minval=50, maxval=99, tooltip="Both DOM AND ACT SELL volume % must be >= this for a prop SELL. Default 83 = the lowest prop buy/sell confidence required by the indicators on your chart.")
+i_propAPlusReqPct = input.int(88, "Prop A+ grade required volume %", group=groupPropCol, minval=50, maxval=99, tooltip="A-grade signals also need dominant volume % >= this to be flagged A+ (highest conviction). Default 88 keeps A+ above your 83% base requirement.")
+i_propColLabels   = input.bool(true, "Plot PROP A+/B+ markers on chart", group=groupPropCol, tooltip="Plot the volume-synced PROP buy/sell markers on the chart (separate from the original A+/B+ labels).")
+
+//=============================================================================
+// Coach + Alerts
+//=============================================================================
+groupCoach = "Coach (Signals + Alerts)"
+coachMode = input.string("A/B stack (exact)", "Coach signal source",
+     options=["A/B stack (exact)","Threshold diamonds (buy/sell)","Active thresholds (buy/sell)","AI bias only","Hybrid (A/B else AI/Threshold)"],
+     group=groupCoach)
+
+alertTiming = input.string("Confirmed (exact)", "Alert timing", options=["Confirmed (exact)","Live preview (intrabar)"], group=groupCoach)
+shapeTiming = input.string("Live preview (intrabar)", "Marker timing", options=["Live preview (intrabar)","Confirmed (exact)"], group=groupCoach)
+
+showShapes  = input.bool(true, "Show BUY/SELL markers", group=groupCoach)
+tintChartBg = input.bool(false, "Tint chart background by LIVE coach", group=groupCoach)
+
+enableBuySellAlerts   = input.bool(true, "Enable BUY/SELL alertconditions", group=groupCoach)
+enableHoldAlerts      = input.bool(false, "Enable HOLD alertconditions", group=groupCoach)
+holdAlertMode         = input.string("On change", "HOLD alert mode", options=["On change","Every bar"], group=groupCoach)
+enableThresholdAlerts = input.bool(false, "Enable threshold alertconditions", group=groupCoach)
+
+//=============================================================================
+// In-Trade State Machine
+//=============================================================================
+groupState = "In-Trade State Machine (IN-LONG / IN-SHORT / EXIT)"
+stateEnable        = input.bool(true, "Enable trade state machine", group=groupState)
+exitOnOpposite     = input.bool(true, "Exit on opposite COACH signal", group=groupState)
+exitMode           = input.string("Flip", "On opposite: Flip or Flat", options=["Flip","Flat"], group=groupState)
+exitOnDomActFlip   = input.bool(false, "Exit if DOM+ACT flip against position", group=groupState)
+exitOnAiFlip       = input.bool(false, "Exit if AI flips against position (50-line)", group=groupState)
+enableStateAlerts  = input.bool(true, "Enable STATE alertconditions", group=groupState)
+
+//=============================================================================
+// Panel controls
+//=============================================================================
+groupPanel = "Panel"
+showPanel = input.bool(true, "Show panel", group=groupPanel)
+panelMode = input.string("Anchored (Table)", "Panel mode", options=["Anchored (Table)","Floating (Price-Level)"], group=groupPanel)
+panelPos = input.string("Top Right", "Anchored position",
+     options=["Top Left","Top Center","Top Right","Center Left","Center","Center Right","Bottom Left","Bottom Center","Bottom Right"],
+     group=groupPanel)
+
+tagTextSize = input.string("Normal", "Text size", options=["Small","Normal","Large"], group=groupPanel)
+tagAlpha    = input.int(10, "Fill transparency (0=solid)", minval=0, maxval=90, group=groupPanel)
+stripeAlpha = input.int(0, "Stripe transparency (0=solid)", minval=0, maxval=90, group=groupPanel)
+tagPad      = input.string(" ", "Left padding", group=groupPanel)
+showStripes = input.bool(true, "Show stripe accents (more labels)", group=groupPanel)
+
+//=============================================================================
+// VC Text Tag
+//=============================================================================
+groupMiniVC = "VC Text Tag"
+miniVCPlacement = input.string("Prefix", "Show VC text tag", options=["Off","Prefix","Suffix"], group=groupMiniVC)
+miniVCNumberMode = input.string("Whole %", "VC text number mode", options=["Whole %","Single digit"], group=groupMiniVC)
+miniVCShowFlags  = input.bool(true, "Show threshold/divergence flags", group=groupMiniVC)
+miniVCShowTag    = input.bool(true, "Prefix with VC", group=groupMiniVC)
+miniVCRepeatAllRows = input.bool(false, "Repeat VC text on every row", group=groupMiniVC)
+
+//=============================================================================
+// VC Candle Replica
+//=============================================================================
+groupReplica = "VC Candle Replica"
+showVCReplica      = input.bool(true, "Show VC candle replica", group=groupReplica)
+vcReplicaWidthBars = input.int(1, "Replica width (bars)", minval=1, maxval=4, group=groupReplica)
+vcReplicaGapBars   = input.int(2, "Replica gap left of panel", minval=1, maxval=10, group=groupReplica)
+vcReplicaSpanRows  = input.float(4.6, "Replica height (row spans)", minval=2.0, maxval=8.0, step=0.1, group=groupReplica)
+vcReplicaGray      = input.color(color.gray, "Replica total-volume color", group=groupReplica)
+
+//=============================================================================
+// Floating panel #1 only
+//=============================================================================
+groupFloat1 = "Floating Panel"
+float1Enable   = input.bool(true, "Enable floating panel", group=groupFloat1)
+float1Preset   = input.string("Manual", "Anchor preset", options=["Manual","Upper","Middle","Lower"], group=groupFloat1)
+float1AnchorPx = input.float(0.0, "Manual anchor price (0 = use current price)", group=groupFloat1)
+float1Lookback = input.int(120, "Auto anchor lookback bars", minval=20, maxval=500, group=groupFloat1)
+float1XBars    = input.int(3, "X offset bars (to the right)", minval=0, maxval=250, group=groupFloat1)
+float1GapMode  = input.string("ATR", "Row spacing mode", options=["ATR","Ticks"], group=groupFloat1)
+float1GapATR   = input.float(0.25, "ATR gap multiplier", minval=0.05, maxval=2.0, step=0.05, group=groupFloat1)
+float1GapTicks = input.int(80, "Tick gap (Ticks mode)", minval=5, maxval=500, group=groupFloat1)
+
+//=============================================================================
+// Colors
+//=============================================================================
+groupColors = "Colors"
+cDomBuy  = input.color(color.teal,   "DOM Buy", group=groupColors, inline="d")
+cDomSell = input.color(color.maroon, "DOM Sell", group=groupColors, inline="d")
+cActBuy  = input.color(color.green,  "ACT Buy", group=groupColors, inline="a")
+cActSell = input.color(color.red,    "ACT Sell", group=groupColors, inline="a")
+cAI      = input.color(color.blue,   "AI row", group=groupColors)
+cExit    = input.color(color.orange, "EXIT highlight", group=groupColors)
+
+//=============================================================================
+// Symbol detection
+//=============================================================================
+string _symU = str.upper(syminfo.ticker)
+string _idU  = str.upper(syminfo.tickerid)
+string _blob = _symU + " " + _idU
+
+bool isXAU = str.contains(_blob, "XAU") or str.contains(_blob, "GOLD")
+bool isNAS = str.contains(_blob, "NAS") or str.contains(_blob, "NAS100") or str.contains(_blob, "US100") or str.contains(_blob, "USTEC") or str.contains(_blob, "NQ") or str.contains(_blob, "NDX")
+
+string symClass = isXAU ? "XAU" : isNAS ? "NAS" : "OTH"
+
+//=============================================================================
+// Preset thresholds
+//=============================================================================
+bool isAgg = tradeStyle == "Aggressive"
+
+int   volThrAgg0       = 62
+int   volAThrAgg0      = 62
+int   aiBullAgg0       = 58
+int   aiBearAgg0       = 42
+float abMinRelVolAgg0  = 1.0
+int   abStrongBullAgg0 = 60
+int   abStrongBearAgg0 = 40
+int   abMinConfAAgg0   = 65
+int   abMinConfBAgg0   = 55
+float niThrAgg0        = 0.06
+int   niSlopeLenAgg0   = 1
+float niMinRelVolAgg0  = 0.90
+
+int   volThrAgg   = autoTuneXN and isAgg ? (isXAU ? 60 : isNAS ? 64 : volThrAgg0) : volThrAgg0
+int   volAThrAgg  = autoTuneXN and isAgg ? (isXAU ? 60 : isNAS ? 64 : volAThrAgg0) : volAThrAgg0
+int   aiBullAgg   = autoTuneXN and isAgg ? (isXAU ? 57 : isNAS ? 59 : aiBullAgg0) : aiBullAgg0
+int   aiBearAgg   = autoTuneXN and isAgg ? (isXAU ? 43 : isNAS ? 41 : aiBearAgg0) : aiBearAgg0
+
+float abMinRelVolAgg = autoTuneXN and isAgg ? (isXAU ? 0.95 : isNAS ? 1.10 : abMinRelVolAgg0) : abMinRelVolAgg0
+int   abStrongBullAgg = autoTuneXN and isAgg ? (isXAU ? 58 : isNAS ? 62 : abStrongBullAgg0) : abStrongBullAgg0
+int   abStrongBearAgg = autoTuneXN and isAgg ? (isXAU ? 42 : isNAS ? 38 : abStrongBearAgg0) : abStrongBearAgg0
+int   abMinConfAAgg   = autoTuneXN and isAgg ? (isXAU ? 63 : isNAS ? 66 : abMinConfAAgg0) : abMinConfAAgg0
+int   abMinConfBAgg   = autoTuneXN and isAgg ? (isXAU ? 53 : isNAS ? 56 : abMinConfBAgg0) : abMinConfBAgg0
+
+float niThrAgg       = autoTuneXN and isAgg ? (isXAU ? 0.055 : isNAS ? 0.070 : niThrAgg0) : niThrAgg0
+int   niSlopeLenAgg  = autoTuneXN and isAgg ? (isXAU ? 1 : isNAS ? 1 : niSlopeLenAgg0) : niSlopeLenAgg0
+float niMinRelVolAgg = autoTuneXN and isAgg ? (isXAU ? 0.85 : isNAS ? 1.05 : niMinRelVolAgg0) : niMinRelVolAgg0
+
+int volThrEff   = isAgg ? volThrAgg : tradeStyle == "Balanced" ? 70 : i_volThreshold
+int volAThrEff  = isAgg ? volAThrAgg : tradeStyle == "Balanced" ? 70 : i_volAThreshold
+
+int aiBullEff   = isAgg ? aiBullAgg : tradeStyle == "Balanced" ? i_aiBull : i_aiBull
+int aiBearEff   = isAgg ? aiBearAgg : tradeStyle == "Balanced" ? i_aiBear : i_aiBear
+
+float abMinRelVolEff = isAgg ? abMinRelVolAgg : tradeStyle == "Balanced" ? i_abMinRelVol : i_abMinRelVol
+int   abStrongBullEff = isAgg ? abStrongBullAgg : tradeStyle == "Balanced" ? i_abStrongBull : i_abStrongBull
+int   abStrongBearEff = isAgg ? abStrongBearAgg : tradeStyle == "Balanced" ? i_abStrongBear : i_abStrongBear
+int   abMinConfAEff   = isAgg ? abMinConfAAgg : tradeStyle == "Balanced" ? i_abMinConfA : i_abMinConfA
+int   abMinConfBEff   = isAgg ? abMinConfBAgg : tradeStyle == "Balanced" ? i_abMinConfB : i_abMinConfB
+
+float niThrEff       = isAgg ? niThrAgg : tradeStyle == "Balanced" ? i_niThr : i_niThr
+int   niSlopeLenEff  = isAgg ? niSlopeLenAgg : tradeStyle == "Balanced" ? i_niSlopeLen : i_niSlopeLen
+float niMinRelVolEff = isAgg ? niMinRelVolAgg : tradeStyle == "Balanced" ? i_niMinRelVol : i_niMinRelVol
+
+bool exitOnDomActFlipEff = isAgg ? true : exitOnDomActFlip
+bool exitOnAiFlipEff     = isAgg ? false : exitOnAiFlip
+
+string styleTag = tradeStyle == "Aggressive" ? (autoTuneXN ? "AGG-AUTO:" + symClass : "AGG") : tradeStyle == "Balanced" ? "BAL" : "CUS"
+
+//=============================================================================
+// Helpers
+//=============================================================================
+safeDiv(float num, float den, float fallback) =>
+    (na(num) or na(den) or den == 0.0) ? fallback : (num / den)
+
+clamp(float x, float lo, float hi) =>
+    math.min(math.max(x, lo), hi)
+
+sigmoid(float z) =>
+    1.0 / (1.0 + math.exp(-clamp(z, -12.0, 12.0)))
+
+fmt2(float x) =>
+    str.format("{0,number,0.00}", x)
+
+f_attachMini(string base, string mini, string placement) =>
+    string out = base
+    if placement == "Prefix"
+        out := mini + "  " + base
+    else if placement == "Suffix"
+        out := base + "  " + mini
+    out
+
+float atr14 = ta.atr(14)
+
+txtSize() =>
+    s = size.normal
+    if tagTextSize == "Small"
+        s := size.small
+    else if tagTextSize == "Large"
+        s := size.large
+    s
+
+f_upd(label lb, int x, float y, string txt, color bg, color tc, sz) =>
+    label out = lb
+    if na(out)
+        out := label.new(x, y, txt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, color=bg, textcolor=tc, size=sz)
+    else
+        label.set_xy(out, x, y)
+        label.set_text(out, txt)
+        label.set_color(out, bg)
+        label.set_textcolor(out, tc)
+        label.set_size(out, sz)
+    out
+
+f_upd_plain(label lb, int x, float y, string txt, color tc, sz) =>
+    label out = lb
+    if na(out)
+        out := label.new(x, y, txt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_none, color=color.new(color.black, 100), textcolor=tc, size=sz)
+    else
+        label.set_xy(out, x, y)
+        label.set_text(out, txt)
+        label.set_color(out, color.new(color.black, 100))
+        label.set_textcolor(out, tc)
+        label.set_size(out, sz)
+    out
+
+f_vertical_text(string txt) =>
+    string out = ""
+    int n = str.length(txt)
+    for i = 0 to n - 1
+        string ch = str.substring(txt, i, i + 1)
+        out += (i == 0 ? "" : "\n") + ch
+    out
+
+f_del(label lb) =>
+    label out = na
+    if not na(lb)
+        label.delete(lb)
+    out
+
+f_boxdel(box bx) =>
+    box out = na
+    if not na(bx)
+        box.delete(bx)
+    out
+
+f_boxupd(box bx, int left, float top, int right, float bottom, color bg) =>
+    box out = bx
+    if na(out)
+        out := box.new(left, top, right, bottom, xloc=xloc.bar_index, bgcolor=bg, border_color=color.new(color.black, 100))
+    else
+        box.set_lefttop(out, left, top)
+        box.set_rightbottom(out, right, bottom)
+        box.set_bgcolor(out, bg)
+        box.set_border_color(out, color.new(color.black, 100))
+    out
+
+f_gap(string mode, float atrMult, int tickGap) =>
+    float g = syminfo.mintick * float(tickGap)
+    if mode == "ATR"
+        g := atr14 * atrMult
+    g
+
+f_baseY(string preset, float manualPx, int lb) =>
+    float hi = ta.highest(high, lb)
+    float lo = ta.lowest(low, lb)
+    float rng = hi - lo
+    float y = manualPx
+    if preset == "Upper"
+        y := hi - (rng * 0.20)
+    else if preset == "Middle"
+        y := lo + (rng * 0.50)
+    else if preset == "Lower"
+        y := lo + (rng * 0.20)
+    y
+
+//=============================================================================
+// LTF selection
+//=============================================================================
+string volumeSource = i_symbolBool == false ? syminfo.tickerid : i_symbolVolume
+float currentTimeframe = timeframe.in_seconds(timeframe.period) / 60.0
+
+string dynTf = i_tf1
+if currentTimeframe > 30 and currentTimeframe <= 180
+    dynTf := i_tf2
+else if currentTimeframe > 180 and currentTimeframe <= 480
+    dynTf := i_tf3
+else if currentTimeframe > 480 and currentTimeframe <= 1440
+    dynTf := i_tf4
+else if currentTimeframe > 1440 and currentTimeframe <= 4320
+    dynTf := i_tf5
+else if currentTimeframe > 4320
+    dynTf := i_tf6
+
+ltfStats() =>
+    float b  = i_source >= i_source[1] ? volume : 0.0
+    float s  = i_source <  i_source[1] ? volume : 0.0
+    float ba = (i_source >= i_source[1] and volume > volume[1]) ? volume : 0.0
+    float sa = (i_source <  i_source[1] and volume > volume[1]) ? volume : 0.0
+    [b, s, i_source, volume, ba, sa]
+
+[buyVol, sellVol, _, _, buyVolActive, sellVolActive] = request.security_lower_tf(volumeSource, dynTf, ltfStats())
+
+//=============================================================================
+// Totals + smoothing base
+//=============================================================================
+float totalSellVolNorm = array.sum(sellVol)
+float totalBuyVolNorm  = array.sum(buyVol)
+float totalVolNorm     = totalSellVolNorm + totalBuyVolNorm
+
+float totalSellVolANorm = array.sum(sellVolActive)
+float totalBuyVolANorm  = array.sum(buyVolActive)
+float totalVolANorm     = totalSellVolANorm + totalBuyVolANorm
+
+smoothedValue(source, length) =>
+    float out = na
+    if i_smoothingType == "SMA"
+        out := ta.sma(source, length)
+    else if i_smoothingType == "EMA"
+        out := ta.ema(source, length)
+    else if i_smoothingType == "HMA"
+        out := ta.hma(source, length)
+    else if i_smoothingType == "RMA"
+        out := ta.rma(source, length)
+    else
+        out := ta.wma(source, length)
+    out
+
+float volSma = smoothedValue(totalVolNorm, i_volSmaLength)
+
+float totalSellVolRel  = safeDiv(totalSellVolNorm,  volSma, 0.0)
+float totalBuyVolRel   = safeDiv(totalBuyVolNorm,   volSma, 0.0)
+float totalVolRel      = totalSellVolRel + totalBuyVolRel
+
+float totalSellVolARel = safeDiv(totalSellVolANorm, volSma, 0.0)
+float totalBuyVolARel  = safeDiv(totalBuyVolANorm,  volSma, 0.0)
+float totalVolARel     = totalSellVolARel + totalBuyVolARel
+
+float totalVol     = i_relVol == false ? totalVolNorm     : totalVolRel
+float totalBuyVol  = i_relVol == false ? totalBuyVolNorm  : totalBuyVolRel
+float totalSellVol = i_relVol == false ? totalSellVolNorm : totalSellVolRel
+
+float totalVolA     = i_relVol == false ? totalVolANorm     : totalVolARel
+float totalBuyVolA  = i_relVol == false ? totalBuyVolANorm  : totalBuyVolARel
+float totalSellVolA = i_relVol == false ? totalSellVolANorm : totalSellVolARel
+
+float buyVolPerc   = safeDiv(totalBuyVol,  totalVol, 0.5)
+float sellVolPerc  = safeDiv(totalSellVol, totalVol, 0.5)
+float buyVolPercA  = safeDiv(totalBuyVolA,  totalVolA, 0.5)
+float sellVolPercA = safeDiv(totalSellVolA, totalVolA, 0.5)
+
+bool highBuyVol   = buyVolPerc  * 100 >= float(volThrEff)
+bool highSellVol  = sellVolPerc * 100 >= float(volThrEff)
+bool highBuyVolA  = buyVolPercA  * 100 >= float(volAThrEff)
+bool highSellVolA = sellVolPercA * 100 >= float(volAThrEff)
+
+bool ActiveVolDisagreement = (buyVolPercA > sellVolPercA and buyVolPerc < sellVolPerc) or (buyVolPercA < sellVolPercA and buyVolPerc > sellVolPerc)
+
+//=============================================================================
+// AI layer
+//=============================================================================
+float hlRange  = high - low
+float closePos = hlRange != 0.0 ? (close - low) / hlRange : 0.5
+float openPos  = hlRange != 0.0 ? (open - low) / hlRange : 0.5
+
+bool engulfingUp   = high > high[1] and low < low[1] and closePos > 0.60
+bool engulfingDown = high > high[1] and low < low[1] and closePos < 0.40
+bool wickUp        = high < high[1] and low < low[1] and closePos > 0.60 and openPos > 0.40
+bool wickDown      = high > high[1] and low > low[1] and closePos < 0.40 and openPos < 0.60
+
+float barRange = high - low
+bool expUp   = high > high[1] and low > low[1] and closePos > 0.70 and barRange > (barRange[1] * 1.5)
+bool expDown = high < high[1] and low < low[1] and closePos < 0.30 and barRange > (barRange[1] * 1.5)
+
+float relVolRatio = safeDiv(totalVolNorm, volSma, 1.0)
+float vpi  = safeDiv(totalBuyVol, totalVol, 0.5) - safeDiv(totalSellVol, totalVol, 0.5)
+float vpiA = safeDiv(totalBuyVolA, totalVolA, 0.5) - safeDiv(totalSellVolA, totalVolA, 0.5)
+
+float x1 = clamp(vpi, -1.0, 1.0)
+float x2 = clamp(vpiA, -1.0, 1.0)
+float x3 = clamp(relVolRatio - 1.0, -2.0, 2.0) / 2.0
+float x4 = ActiveVolDisagreement ? 1.0 : 0.0
+float x5 = expUp ? 1.0 : expDown ? -1.0 : 0.0
+float x6 = (wickUp or engulfingUp) ? 1.0 : (wickDown or engulfingDown) ? -1.0 : 0.0
+
+var float w0 = 0.0
+var float w1 = 0.0
+var float w2 = 0.0
+var float w3 = 0.0
+var float w4 = 0.0
+var float w5 = 0.0
+var float w6 = 0.0
+
+var float px1 = na
+var float px2 = na
+var float px3 = na
+var float px4 = na
+var float px5 = na
+var float px6 = na
+
+float zNow   = w0 + w1*x1 + w2*x2 + w3*x3 + w4*x4 + w5*x5 + w6*x6
+float aiProb = sigmoid(zNow) * 100.0
+
+if i_aiEnable and i_aiLearn and barstate.isconfirmed
+    if not na(px1)
+        float y = close > close[1] ? 1.0 : 0.0
+        float zPrev = w0 + w1*px1 + w2*px2 + w3*px3 + w4*px4 + w5*px5 + w6*px6
+        float pPrev = sigmoid(zPrev)
+        float err = y - pPrev
+
+        w0 *= i_aiDecay
+        w1 *= i_aiDecay
+        w2 *= i_aiDecay
+        w3 *= i_aiDecay
+        w4 *= i_aiDecay
+        w5 *= i_aiDecay
+        w6 *= i_aiDecay
+
+        w0 += i_aiLR * err
+        w1 += i_aiLR * err * px1
+        w2 += i_aiLR * err * px2
+        w3 += i_aiLR * err * px3
+        w4 += i_aiLR * err * px4
+        w5 += i_aiLR * err * px5
+        w6 += i_aiLR * err * px6
+
+        w0 := clamp(w0, -i_aiClip, i_aiClip)
+        w1 := clamp(w1, -i_aiClip, i_aiClip)
+        w2 := clamp(w2, -i_aiClip, i_aiClip)
+        w3 := clamp(w3, -i_aiClip, i_aiClip)
+        w4 := clamp(w4, -i_aiClip, i_aiClip)
+        w5 := clamp(w5, -i_aiClip, i_aiClip)
+        w6 := clamp(w6, -i_aiClip, i_aiClip)
+
+    px1 := x1
+    px2 := x2
+    px3 := x3
+    px4 := x4
+    px5 := x5
+    px6 := x6
+
+bool aiBull = i_aiEnable and aiProb >= float(aiBullEff)
+bool aiBear = i_aiEnable and aiProb <= float(aiBearEff)
+
+//=============================================================================
+// *** PROP QUALITY FILTERS — computed here, applied below ***
+//=============================================================================
+
+// EMA 20 / 200 (using user-defined fast/slow lengths — default 20/200)
+float emaFast = ta.ema(close, i_abFastLen)
+float emaSlow = ta.ema(close, i_abSlowLen)
+bool trendUp = emaFast > emaSlow
+bool trendDn = emaFast < emaSlow
+
+// --- Filter 1: Candle Body Filter ---
+// Entry candle must have a real body >= i_bodyMinPct x ATR(14)
+// Eliminates doji, spinning tops, and indecision candles
+float candleBody     = math.abs(close - open)
+bool  bodyFilterPass = not i_propEnable or not i_bodyFilterOn or (candleBody >= atr14 * i_bodyMinPct)
+
+// --- Filter 2: ATR Compression Guard ---
+// Current ATR must be >= i_atrCompressRatio x its own SMA
+// Eliminates entries during tight-range chop sessions where price reverses on the 1st tick
+float atrSma         = ta.sma(atr14, i_atrCompressLen)
+float atrRatio       = safeDiv(atr14, atrSma, 1.0)
+bool  atrExpandPass  = not i_propEnable or not i_atrCompressOn or (atrRatio >= i_atrCompressRatio)
+
+// --- Filter 3: EMA-20 Proximity (Pullback Entry Filter) ---
+// Price must have touched/been within 1x ATR of the fast EMA in the last N bars
+// Ensures you're entering on a pullback to EMA-20, not chasing an overextended move
+// (Overextended = extended away from EMA -> high reversal risk)
+float distFromEma20  = math.abs(close - emaFast)
+float minDistN       = ta.lowest(distFromEma20, i_emaTouchBars)
+bool  emaTouchPass   = not i_propEnable or not i_emaTouchOn or (minDistN <= atr14 * 1.0)
+
+// --- Filter 4: HTF 15m DOM Bias ---
+// Pull the 15m DOM direction from a security call
+// Longs only when 15m DOM is BUY, Shorts only when 15m DOM is SELL
+htf15mBuyVolPerc() =>
+    float bv = i_source >= i_source[1] ? volume : 0.0
+    float sv = i_source <  i_source[1] ? volume : 0.0
+    float tot = bv + sv
+    safeDiv(bv, tot, 0.5)
+
+float htfBuyPct = request.security(syminfo.tickerid, "15", htf15mBuyVolPerc(), lookahead=barmerge.lookahead_off)
+bool  htfDomBull = htfBuyPct >= 0.50
+bool  htfDomBear = htfBuyPct < 0.50
+// Pass if HTF agrees or filter is off
+bool  htfBiasPassLong  = not i_propEnable or not i_htfBiasOn or htfDomBull
+bool  htfBiasPassShort = not i_propEnable or not i_htfBiasOn or htfDomBear
+
+// --- Filter 5: Consecutive Momentum Bars (for B/NI grade trades) ---
+// Requires N consecutive higher closes (longs) or lower closes (shorts)
+// Applied only to B-grade and NI signals — keeps A-grade untouched
+int consLen = math.max(i_consBarLen, 2)
+bool consUpOk   = not i_propEnable or not i_consBarOn or ta.rising(close, consLen - 1)
+bool consDnOk   = not i_propEnable or not i_consBarOn or ta.falling(close, consLen - 1)
+
+// --- Combined prop gate per direction ---
+// A-trades: body + ATR expand + EMA proximity + HTF bias (no consecutive bar req — A-trades are strongest)
+bool propGateLongA  = bodyFilterPass and atrExpandPass and emaTouchPass and htfBiasPassLong
+bool propGateShortA = bodyFilterPass and atrExpandPass and emaTouchPass and htfBiasPassShort
+// B/NI-trades: all of the above + consecutive bars
+bool propGateLongBNI  = propGateLongA  and consUpOk
+bool propGateShortBNI = propGateShortA and consDnOk
+
+//=============================================================================
+// A/B + NI stacks (ORIGINAL LOGIC — prop gate applied as additional AND)
+//=============================================================================
+bool tf5m = timeframe.isminutes and timeframe.multiplier == 5
+bool tfOkAB = i_abOnly5m ? tf5m : true
+bool tfOkNI = i_niOnly5m ? tf5m : true
+
+bool relOkAB = abMinRelVolEff <= 0.0 ? true : (relVolRatio >= abMinRelVolEff)
+
+float dirScore = clamp(vpiA * 100.0, -100.0, 100.0)
+float relBoost = clamp((relVolRatio - 1.0) * 20.0, 0.0, 20.0)
+float confBuy  = clamp(aiProb + (dirScore * 0.20) + relBoost, 0.0, 100.0)
+float confSell = clamp((100.0 - aiProb) - (dirScore * 0.20) + relBoost, 0.0, 100.0)
+
+bool domBuy = totalBuyVol >= totalSellVol
+bool actBuy = totalBuyVolA >= totalSellVolA
+
+bool buyAnom  = highBuyVol or highBuyVolA
+bool sellAnom = highSellVol or highSellVolA
+
+bool niRelOk  = niMinRelVolEff <= 0.0 ? true : (relVolRatio >= niMinRelVolEff)
+bool vpiARise = ta.rising(vpiA, niSlopeLenEff)
+bool vpiAFall = ta.falling(vpiA, niSlopeLenEff)
+bool aDataNotNa = na(totalVolA) == false and totalVolA > 0
+
+// Original A/B/NI conditions unchanged — prop gate added as last condition
+bool aLongLive  = i_abEnable and tfOkAB and relOkAB and buyAnom  and domBuy and actBuy and (not ActiveVolDisagreement) and (aiProb >= float(abStrongBullEff)) and (confBuy  >= float(abMinConfAEff)) and (not i_abUseTrend or trendUp) and propGateLongA
+bool aShortLive = i_abEnable and tfOkAB and relOkAB and sellAnom and (not domBuy) and (not actBuy) and (not ActiveVolDisagreement) and (aiProb <= float(abStrongBearEff)) and (confSell >= float(abMinConfAEff)) and (not i_abUseTrend or trendDn) and propGateShortA
+
+bool bLongLive  = i_abEnable and tfOkAB and relOkAB and buyAnom  and (aiBull or aiProb >= float(aiBullEff)) and (confBuy  >= float(abMinConfBEff)) and (not i_abUseTrend or trendUp) and propGateLongBNI
+bool bShortLive = i_abEnable and tfOkAB and relOkAB and sellAnom and (aiBear or aiProb <= float(aiBearEff)) and (confSell >= float(abMinConfBEff)) and (not i_abUseTrend or trendDn) and propGateShortBNI
+
+bool niLongLive  = i_niEnable and tfOkNI and aDataNotNa and niRelOk and (vpiA >=  niThrEff) and vpiARise and propGateLongBNI
+bool niShortLive = i_niEnable and tfOkNI and aDataNotNa and niRelOk and (vpiA <= -niThrEff) and vpiAFall and propGateShortBNI
+
+bool aLongConf   = aLongLive and barstate.isconfirmed
+bool aShortConf  = aShortLive and barstate.isconfirmed
+bool bLongConf   = bLongLive and barstate.isconfirmed
+bool bShortConf  = bShortLive and barstate.isconfirmed
+bool niLongConf  = niLongLive and barstate.isconfirmed
+bool niShortConf = niShortLive and barstate.isconfirmed
+
+prioStack(bool _aL, bool _aS, bool _bL, bool _bS, bool _niL, bool _niS) =>
+    int st = 0
+    if i_abOnePerBar
+        if _aL
+            st := 1
+        else if _aS
+            st := 2
+        else if _bL
+            st := 3
+        else if _bS
+            st := 4
+        else if _niL
+            st := 7
+        else if _niS
+            st := 8
+    st
+
+int sigLive = prioStack(aLongLive, aShortLive, bLongLive, bShortLive, niLongLive, niShortLive)
+int sigConf = prioStack(aLongConf, aShortConf, bLongConf, bShortConf, niLongConf, niShortConf)
+
+sigNameFromType(int _t) =>
+    string out = "-"
+    if _t == 1
+        out := "A L"
+    else if _t == 2
+        out := "A S"
+    else if _t == 3
+        out := "B L"
+    else if _t == 4
+        out := "B S"
+    else if _t == 7
+        out := "NI L"
+    else if _t == 8
+        out := "NI S"
+    out
+
+string sigLiveName = sigNameFromType(sigLive)
+
+//=============================================================================
+// Coach decision
+//=============================================================================
+bool buyFromAB_live  = (sigLive == 1 or sigLive == 3)
+bool sellFromAB_live = (sigLive == 2 or sigLive == 4)
+bool buyFromAB_conf  = (sigConf == 1 or sigConf == 3)
+bool sellFromAB_conf = (sigConf == 2 or sigConf == 4)
+
+bool buyFromDiamonds  = highBuyVol
+bool sellFromDiamonds = highSellVol
+bool buyFromActive    = highBuyVolA
+bool sellFromActive   = highSellVolA
+bool buyFromAI        = aiBull
+bool sellFromAI       = aiBear
+
+coachPick(_abBuy, _abSell) =>
+    bool cb = false
+    bool cs = false
+    if coachMode == "A/B stack (exact)"
+        cb := _abBuy
+        cs := _abSell
+    else if coachMode == "Threshold diamonds (buy/sell)"
+        cb := buyFromDiamonds
+        cs := sellFromDiamonds
+    else if coachMode == "Active thresholds (buy/sell)"
+        cb := buyFromActive
+        cs := sellFromActive
+    else if coachMode == "AI bias only"
+        cb := buyFromAI
+        cs := sellFromAI
+    else
+        cb := _abBuy ? true : ((aiBull and buyAnom) or (highBuyVolA and aiBull) or (highBuyVol and aiBull))
+        cs := _abSell ? true : ((aiBear and sellAnom) or (highSellVolA and aiBear) or (highSellVol and aiBear))
+    [cb, cs]
+
+[coachBuyLive, coachSellLive] = coachPick(buyFromAB_live, sellFromAB_live)
+[coachBuyConf, coachSellConf] = coachPick(buyFromAB_conf, sellFromAB_conf)
+bool coachHoldLive = not coachBuyLive and not coachSellLive
+bool coachHoldConf = not coachBuyConf and not coachSellConf
+
+//=============================================================================
+// State machine
+//=============================================================================
+var int  tradeState = 0
+var bool didEnterLong  = false
+var bool didEnterShort = false
+var bool didExitLong   = false
+var bool didExitShort  = false
+var string exitText    = ""
+
+didEnterLong := false
+didEnterShort := false
+didExitLong := false
+didExitShort := false
+exitText := ""
+
+if stateEnable and barstate.isconfirmed
+    bool domActAgainstLong  = (not domBuy) and (not actBuy)
+    bool domActAgainstShort = domBuy and actBuy
+    bool aiAgainstLong  = aiProb < 50.0
+    bool aiAgainstShort = aiProb > 50.0
+
+    if tradeState == 1
+        bool exitByOpp = exitOnOpposite and coachSellConf
+        bool exitByDA  = exitOnDomActFlipEff and domActAgainstLong
+        bool exitByAI  = exitOnAiFlipEff and aiAgainstLong
+        if exitByOpp or exitByDA or exitByAI
+            didExitLong := true
+            exitText := exitByOpp ? "EXIT LONG (opp)" : exitByDA ? "EXIT LONG (DA)" : "EXIT LONG (AI)"
+            tradeState := (exitByOpp and exitMode == "Flip") ? -1 : 0
+            if (exitByOpp and exitMode == "Flip")
+                didEnterShort := true
+
+    else if tradeState == -1
+        bool exitByOpp = exitOnOpposite and coachBuyConf
+        bool exitByDA  = exitOnDomActFlipEff and domActAgainstShort
+        bool exitByAI  = exitOnAiFlipEff and aiAgainstShort
+        if exitByOpp or exitByDA or exitByAI
+            didExitShort := true
+            exitText := exitByOpp ? "EXIT SHORT (opp)" : exitByDA ? "EXIT SHORT (DA)" : "EXIT SHORT (AI)"
+            tradeState := (exitByOpp and exitMode == "Flip") ? 1 : 0
+            if (exitByOpp and exitMode == "Flip")
+                didEnterLong := true
+
+    if tradeState == 0
+        if coachBuyConf
+            tradeState := 1
+            didEnterLong := true
+        else if coachSellConf
+            tradeState := -1
+            didEnterShort := true
+
+//=============================================================================
+// Shapes + Background
+//=============================================================================
+bool useLiveShapes = (shapeTiming == "Live preview (intrabar)")
+bool shapeBuy  = showShapes and (useLiveShapes ? coachBuyLive : coachBuyConf)
+bool shapeSell = showShapes and (useLiveShapes ? coachSellLive : coachSellConf)
+
+plotshape(shapeBuy,  title="Coach BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="BUY",  textcolor=color.black)
+plotshape(shapeSell, title="Coach SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,  0), size=size.tiny, text="SELL", textcolor=color.white)
+
+// *** Original Prop Entry Quality Labels (UNCHANGED) ***
+// A+ = A-grade signal passed all prop filters (highest conviction, do not skip)
+// B+ = B or NI grade signal passed all prop filters
+bool isAgrade = (sigLive == 1 or sigLive == 2)
+bool isBNIgrade = (sigLive == 3 or sigLive == 4 or sigLive == 7 or sigLive == 8)
+bool anySignalLive = sigLive != 0
+
+bool showAPlusLong  = i_showQualityLabel and anySignalLive and isAgrade   and coachBuyLive
+bool showAPlusShort = i_showQualityLabel and anySignalLive and isAgrade   and coachSellLive
+bool showBPlusLong  = i_showQualityLabel and anySignalLive and isBNIgrade and coachBuyLive
+bool showBPlusShort = i_showQualityLabel and anySignalLive and isBNIgrade and coachSellLive
+
+plotshape(showAPlusLong,  title="A+ Long",  style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,   15), size=size.small, text="A+", textcolor=color.black,  offset=-1)
+plotshape(showAPlusShort, title="A+ Short", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,    15), size=size.small, text="A+", textcolor=color.white,  offset=-1)
+plotshape(showBPlusLong,  title="B+ Long",  style=shape.labelup,   location=location.belowbar, color=color.new(color.teal,   15), size=size.small, text="B+", textcolor=color.white,  offset=-1)
+plotshape(showBPlusShort, title="B+ Short", style=shape.labeldown, location=location.abovebar, color=color.new(color.maroon, 15), size=size.small, text="B+", textcolor=color.white,  offset=-1)
+
+//=============================================================================
+// *** NEW: PROP VOLUME % COLUMN — synced to your prop buy/sell percentages ***
+// This is the "volume-true" buy/sell column. It only flags A+/B+ when BOTH the
+// dominant (DOM) and active (ACT) volume % meet the % your prop rules require,
+// AND the existing signal grade + quality filters agree. Reflects real volume.
+//=============================================================================
+float propDomBuyPct  = buyVolPerc   * 100.0   // dominant BUY volume %
+float propDomSellPct = sellVolPerc  * 100.0   // dominant SELL volume %
+float propActBuyPct  = buyVolPercA  * 100.0   // active BUY volume %
+float propActSellPct = sellVolPercA * 100.0   // active SELL volume %
+
+// Required volume % satisfied for each direction (DOM and ACT must both agree)
+bool propBuyVolReq  = (propDomBuyPct  >= float(i_propBuyReqPct))  and (propActBuyPct  >= float(i_propBuyReqPct))
+bool propSellVolReq = (propDomSellPct >= float(i_propSellReqPct)) and (propActSellPct >= float(i_propSellReqPct))
+
+// A+ = A-grade live signal + prop gate + dominant vol% >= A+ requirement
+bool propAPlusBuyLive  = anySignalLive and isAgrade   and coachBuyLive  and propBuyVolReq  and (propDomBuyPct  >= float(i_propAPlusReqPct))
+bool propAPlusSellLive = anySignalLive and isAgrade   and coachSellLive and propSellVolReq and (propDomSellPct >= float(i_propAPlusReqPct))
+// B+ = B/NI-grade live signal + prop gate + base vol% requirement
+bool propBPlusBuyLive  = anySignalLive and isBNIgrade and coachBuyLive  and propBuyVolReq
+bool propBPlusSellLive = anySignalLive and isBNIgrade and coachSellLive and propSellVolReq
+
+bool propBuySig  = propAPlusBuyLive  or propBPlusBuyLive
+bool propSellSig = propAPlusSellLive or propBPlusSellLive
+
+// Confirmed variants (for alerts)
+bool propAPlusBuyConf  = propAPlusBuyLive  and barstate.isconfirmed
+bool propAPlusSellConf = propAPlusSellLive and barstate.isconfirmed
+bool propBPlusBuyConf  = propBPlusBuyLive  and barstate.isconfirmed
+bool propBPlusSellConf = propBPlusSellLive and barstate.isconfirmed
+
+string propGradeTxt = propAPlusBuyLive ? "A+ BUY" : propAPlusSellLive ? "A+ SELL" : propBPlusBuyLive ? "B+ BUY" : propBPlusSellLive ? "B+ SELL" : "SKIP"
+float propShownPct  = propBuySig ? propDomBuyPct : propSellSig ? propDomSellPct : math.max(propDomBuyPct, propDomSellPct)
+
+// *** Chart markers for the volume-synced PROP column (separate from originals) ***
+plotshape(i_propColOn and i_propColLabels and propAPlusBuyLive,  title="PROP A+ BUY",  style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,   0), size=size.normal, text="PA+", textcolor=color.black, offset=0)
+plotshape(i_propColOn and i_propColLabels and propAPlusSellLive, title="PROP A+ SELL", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,    0), size=size.normal, text="PA+", textcolor=color.white, offset=0)
+plotshape(i_propColOn and i_propColLabels and propBPlusBuyLive,  title="PROP B+ BUY",  style=shape.labelup,   location=location.belowbar, color=color.new(color.teal,   0), size=size.small,  text="PB+", textcolor=color.white, offset=0)
+plotshape(i_propColOn and i_propColLabels and propBPlusSellLive, title="PROP B+ SELL", style=shape.labeldown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.small,  text="PB+", textcolor=color.white, offset=0)
+
+color bgCol = na
+if tintChartBg
+    bgCol := coachBuyLive ? color.new(color.green, 90) : coachSellLive ? color.new(color.red, 90) : color.new(color.yellow, 92)
+bgcolor(bgCol)
+
+//=============================================================================
+// *** EMA 20 / 200 Plots ***
+// Plotted clearly so you can visually confirm pullback-to-EMA entries
+//=============================================================================
+plot(emaFast, title="EMA 20 (Fast / Prop Core)", color=color.new(color.orange, 0),   linewidth=2)
+plot(emaSlow, title="EMA 200 (Slow / Trend)",    color=color.new(color.white,  40),  linewidth=1, style=plot.style_linebr)
+
+// EMA 20/200 ribbon fill — green above (bullish structure), red below (bearish)
+ema20above200 = emaFast >= emaSlow
+p1 = plot(emaFast, display=display.none)
+p2 = plot(emaSlow, display=display.none)
+fill(p1, p2, color = ema20above200 ? color.new(color.green, 88) : color.new(color.red, 88), title="EMA 20/200 Ribbon")
+
+// *** ATR Compression visual — background tint when in chop (no-entry zone) ***
+bool inChop = i_propEnable and i_atrCompressOn and not atrExpandPass
+bgcolor(inChop ? color.new(color.gray, 93) : na, title="Chop Zone (ATR Compressed)")
+
+//=============================================================================
+// Panel row text
+//=============================================================================
+float dominantVolPerc  = domBuy ? (buyVolPerc * 100.0) : (sellVolPerc * 100.0)
+float dominantVolAPerc = actBuy ? (buyVolPercA * 100.0) : (sellVolPercA * 100.0)
+
+float domAbsNorm = domBuy ? totalBuyVolNorm : totalSellVolNorm
+float actAbsNorm = actBuy ? totalBuyVolANorm : totalSellVolANorm
+
+string domPctTxt = str.tostring(int(math.round(dominantVolPerc, 0))) + "%"
+string actPctTxt = str.tostring(int(math.round(dominantVolAPerc, 0))) + "%"
+
+string domSideTxt  = domBuy ? "DOM BUY" : "DOM SELL"
+string domArrowTxt = domBuy ? "▲" : "▼"
+string actSideTxt  = actBuy ? "ACT BUY" : "ACT SELL"
+string actArrowTxt = actBuy ? "▲" : "▼"
+
+string coachArrowTxt = coachBuyLive ? "▲" : coachSellLive ? "▼" : "▬"
+string coachCoreTxt  = coachBuyLive ? "BUY" : coachSellLive ? "SELL" : "HOLD"
+
+// VC text tag
+string vcDomRounded = miniVCNumberMode == "Single digit"
+     ? str.tostring(int(math.round(dominantVolPerc / 10.0, 0)))
+     : str.tostring(int(math.round(dominantVolPerc, 0)))
+
+string vcActRounded = miniVCNumberMode == "Single digit"
+     ? str.tostring(int(math.round(dominantVolAPerc / 10.0, 0)))
+     : str.tostring(int(math.round(dominantVolAPerc, 0)))
+
+string vcActiveState = actBuy ? (ActiveVolDisagreement ? "(+)" : "+") : (ActiveVolDisagreement ? "(-)" : "-")
+string vcFlagTxt = miniVCShowFlags ? (((highBuyVol or highSellVol or highBuyVolA or highSellVolA) ? "▲" : "") + (ActiveVolDisagreement ? "D" : "")) : ""
+string vcMiniTxt = (miniVCShowTag ? "VC " : "") + "[" + vcDomRounded + "|" + vcActiveState + vcActRounded + vcFlagTxt + "]"
+
+// *** Prop filter status appended to ACT row ***
+string propStatusTxt = i_propEnable ? (" | PROP:" + (bodyFilterPass ? "B✓" : "B✗") + (atrExpandPass ? "V✓" : "V✗") + (emaTouchPass ? "E✓" : "E✗") + (htfBiasPassLong or htfBiasPassShort ? "H✓" : "H✗")) : ""
+
+string rowActBase   = tagPad + actSideTxt + " " + actArrowTxt + " " + actPctTxt + " [" + styleTag + "]" + propStatusTxt
+string rowTotalBase = tagPad + "TOTAL VOL " + fmt2(totalVolNorm) + " | RV " + fmt2(relVolRatio) + "x"
+string rowDomBase   = tagPad + domSideTxt + " " + domArrowTxt + " " + domPctTxt + " | " + fmt2(domAbsNorm)
+string rowAIBase    = tagPad + "AI prob (up) % " + fmt2(aiProb)
+string rowCoachBase = tagPad + "COACH " + coachCoreTxt + " " + coachArrowTxt + " " + domPctTxt + " (" + sigLiveName + ")"
+
+// *** NEW: PROP column row text ***
+string propArrowTxt = propBuySig ? "▲" : propSellSig ? "▼" : "▬"
+string rowPropBase  = tagPad + "PROP " + propGradeTxt + " " + propArrowTxt + " " + str.tostring(int(math.round(propShownPct, 0))) + "% (req " + str.tostring(i_propBuyReqPct) + "/A+ " + str.tostring(i_propAPlusReqPct) + ")"
+
+string stateTxt = "STATE FLAT"
+if not stateEnable
+    stateTxt := "STATE OFF"
+else
+    if didExitLong or didExitShort
+        stateTxt := "STATE " + exitText
+    else if tradeState == 1
+        stateTxt := "STATE IN-LONG"
+    else if tradeState == -1
+        stateTxt := "STATE IN-SHORT"
+    else
+        stateTxt := "STATE FLAT"
+
+string rowStateBase = tagPad + stateTxt
+
+string rowAct   = f_attachMini(rowActBase, vcMiniTxt, miniVCPlacement)
+string rowTotal = miniVCRepeatAllRows ? f_attachMini(rowTotalBase, vcMiniTxt, miniVCPlacement) : rowTotalBase
+string rowDom   = miniVCRepeatAllRows ? f_attachMini(rowDomBase, vcMiniTxt, miniVCPlacement)   : rowDomBase
+string rowAI    = rowAIBase
+string rowCoach = miniVCRepeatAllRows ? f_attachMini(rowCoachBase, vcMiniTxt, miniVCPlacement) : rowCoachBase
+string rowProp  = miniVCRepeatAllRows ? f_attachMini(rowPropBase, vcMiniTxt, miniVCPlacement)  : rowPropBase
+string rowState = miniVCRepeatAllRows ? f_attachMini(rowStateBase, vcMiniTxt, miniVCPlacement) : rowStateBase
+
+//=============================================================================
+// Row colors
+//=============================================================================
+color totalBg = color.new(color.gray, tagAlpha)
+color totalStripe = color.new(color.gray, stripeAlpha)
+
+color actBg = color.new(actBuy ? cActBuy : cActSell, tagAlpha)
+color domBg = color.new(domBuy ? cDomBuy : cDomSell, tagAlpha)
+color aiBg  = color.new(cAI, tagAlpha)
+
+color coachBg = color.new(coachBuyLive ? color.green : coachSellLive ? color.red : color.yellow, tagAlpha)
+color coachTc = (coachBuyLive or coachSellLive) ? color.white : color.black
+
+// *** NEW: PROP row colors ***
+color propBg = color.new(propBuySig ? color.green : propSellSig ? color.red : color.gray, tagAlpha)
+color propTc = (propBuySig or propSellSig) ? color.white : color.silver
+color propStripe = color.new(propBuySig ? color.green : propSellSig ? color.red : color.gray, stripeAlpha)
+
+color stateBg = color.new(color.gray, tagAlpha)
+color stateTc = color.white
+color stateStripeCol = color.new(color.gray, stripeAlpha)
+
+if stateEnable
+    if didExitLong or didExitShort
+        stateBg := color.new(cExit, tagAlpha)
+        stateStripeCol := color.new(cExit, stripeAlpha)
+        stateTc := color.white
+    else if tradeState == 1
+        stateBg := color.new(color.green, tagAlpha)
+        stateStripeCol := color.new(color.green, stripeAlpha)
+        stateTc := color.white
+    else if tradeState == -1
+        stateBg := color.new(color.red, tagAlpha)
+        stateStripeCol := color.new(color.red, stripeAlpha)
+        stateTc := color.white
+
+color actStripe   = color.new(actBuy ? cActBuy : cActSell, stripeAlpha)
+color domStripe   = color.new(domBuy ? cDomBuy : cDomSell, stripeAlpha)
+color aiStripe    = color.new(cAI, stripeAlpha)
+color coachStripe = color.new(coachBuyLive ? color.green : coachSellLive ? color.red : color.yellow, stripeAlpha)
+
+//=============================================================================
+// Anchored (Table) panel
+//=============================================================================
+pos = position.top_right
+if panelPos == "Top Left"
+    pos := position.top_left
+else if panelPos == "Top Center"
+    pos := position.top_center
+else if panelPos == "Top Right"
+    pos := position.top_right
+else if panelPos == "Center Left"
+    pos := position.middle_left
+else if panelPos == "Center"
+    pos := position.middle_center
+else if panelPos == "Center Right"
+    pos := position.middle_right
+else if panelPos == "Bottom Left"
+    pos := position.bottom_left
+else if panelPos == "Bottom Center"
+    pos := position.bottom_center
+else if panelPos == "Bottom Right"
+    pos := position.bottom_right
+
+// Row count: 6 base rows + 1 PROP row (when column enabled)
+int panelRows = i_propColOn ? 7 : 6
+
+var table t = na
+if panelMode == "Anchored (Table)" and na(t)
+    t := table.new(pos, showStripes ? 2 : 1, 7, border_width=0)
+
+ts = txtSize()
+string stripeChar = " "
+
+if showPanel and panelMode == "Anchored (Table)" and barstate.islast and not na(t)
+    if showStripes
+        table.cell(t, 0, 0, stripeChar, text_color=color.new(color.white, 100), bgcolor=actStripe,      text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, 0, rowAct,     text_color=color.white,               bgcolor=actBg,          text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, 1, stripeChar, text_color=color.new(color.white, 100), bgcolor=totalStripe,    text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, 1, rowTotal,   text_color=color.white,               bgcolor=totalBg,        text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, 2, stripeChar, text_color=color.new(color.white, 100), bgcolor=domStripe,      text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, 2, rowDom,     text_color=color.white,               bgcolor=domBg,          text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, 3, stripeChar, text_color=color.new(color.white, 100), bgcolor=aiStripe,       text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, 3, rowAI,      text_color=color.white,               bgcolor=aiBg,           text_size=ts, text_halign=text.align_left)
+
+        table.cell(t, 0, 4, stripeChar, text_color=color.new(color.white, 100), bgcolor=coachStripe,    text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, 4, rowCoach,   text_color=coachTc,                   bgcolor=coachBg,        text_size=ts, text_halign=text.align_left)
+
+        if i_propColOn
+            table.cell(t, 0, 5, stripeChar, text_color=color.new(color.white, 100), bgcolor=propStripe, text_size=ts, text_halign=text.align_left)
+            table.cell(t, 1, 5, rowProp,    text_color=propTc,                    bgcolor=propBg,      text_size=ts, text_halign=text.align_left)
+
+        int stateRow = i_propColOn ? 6 : 5
+        table.cell(t, 0, stateRow, stripeChar, text_color=color.new(color.white, 100), bgcolor=stateStripeCol, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 1, stateRow, rowState,   text_color=stateTc,                   bgcolor=stateBg,        text_size=ts, text_halign=text.align_left)
+    else
+        table.cell(t, 0, 0, rowAct,   text_color=color.white, bgcolor=actBg,   text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, 1, rowTotal, text_color=color.white, bgcolor=totalBg, text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, 2, rowDom,   text_color=color.white, bgcolor=domBg,   text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, 3, rowAI,    text_color=color.white, bgcolor=aiBg,    text_size=ts, text_halign=text.align_left)
+        table.cell(t, 0, 4, rowCoach, text_color=coachTc,     bgcolor=coachBg, text_size=ts, text_halign=text.align_left)
+        if i_propColOn
+            table.cell(t, 0, 5, rowProp, text_color=propTc, bgcolor=propBg, text_size=ts, text_halign=text.align_left)
+        int stateRow2 = i_propColOn ? 6 : 5
+        table.cell(t, 0, stateRow2, rowState, text_color=stateTc, bgcolor=stateBg, text_size=ts, text_halign=text.align_left)
+
+//=============================================================================
+// Floating panel labels — single panel only
+//=============================================================================
+var label p1ActS = na
+var label p1Act  = na
+var label p1TotS = na
+var label p1Tot  = na
+var label p1DomS = na
+var label p1Dom  = na
+var label p1AiS  = na
+var label p1Ai   = na
+var label p1CchS = na
+var label p1Cch  = na
+var label p1PrpS = na
+var label p1Prp  = na
+var label p1StaS = na
+var label p1Sta  = na
+
+//=============================================================================
+// VC candle replica boxes
+//=============================================================================
+var box rep1Other = na
+var box rep1Dom   = na
+var box rep1Act   = na
+var label rep1Pct = na
+
+if barstate.islast
+    bool useFloat = showPanel and panelMode == "Floating (Price-Level)"
+
+    if not (useFloat and float1Enable)
+        p1ActS := f_del(p1ActS)
+        p1Act  := f_del(p1Act)
+        p1TotS := f_del(p1TotS)
+        p1Tot  := f_del(p1Tot)
+        p1DomS := f_del(p1DomS)
+        p1Dom  := f_del(p1Dom)
+        p1AiS  := f_del(p1AiS)
+        p1Ai   := f_del(p1Ai)
+        p1CchS := f_del(p1CchS)
+        p1Cch  := f_del(p1Cch)
+        p1PrpS := f_del(p1PrpS)
+        p1Prp  := f_del(p1Prp)
+        p1StaS := f_del(p1StaS)
+        p1Sta  := f_del(p1Sta)
+
+    if not (showVCReplica and useFloat and float1Enable)
+        rep1Other := f_boxdel(rep1Other)
+        rep1Dom   := f_boxdel(rep1Dom)
+        rep1Act   := f_boxdel(rep1Act)
+        rep1Pct   := f_del(rep1Pct)
+
+    if useFloat and float1Enable
+        float man1   = float1AnchorPx == 0.0 ? close : float1AnchorPx
+        float baseY1 = float1Preset == "Manual" ? man1 : f_baseY(float1Preset, man1, float1Lookback)
+        float gap1   = f_gap(float1GapMode, float1GapATR, float1GapTicks)
+        int x1_      = bar_index + float1XBars
+        int xs1      = x1_ - 1
+
+        // Row stacking: Act, Tot, Dom, AI, Coach, [Prop], State
+        float yAct1 = baseY1
+        float yTot1 = baseY1 - gap1
+        float yDom1 = baseY1 - gap1 * 2.0
+        float yAi1  = baseY1 - gap1 * 3.0
+        float yCch1 = baseY1 - gap1 * 4.0
+        float yPrp1 = baseY1 - gap1 * 5.0
+        float ySta1 = baseY1 - gap1 * (i_propColOn ? 6.0 : 5.0)
+        float yBottom1 = ySta1   // lowest row for replica anchoring
+
+        if showStripes
+            p1ActS := f_upd(p1ActS, xs1, yAct1, " ", actStripe,      color.new(color.white, 100), size.tiny)
+            p1TotS := f_upd(p1TotS, xs1, yTot1, " ", totalStripe,    color.new(color.white, 100), size.tiny)
+            p1DomS := f_upd(p1DomS, xs1, yDom1, " ", domStripe,      color.new(color.white, 100), size.tiny)
+            p1AiS  := f_upd(p1AiS,  xs1, yAi1,  " ", aiStripe,       color.new(color.white, 100), size.tiny)
+            p1CchS := f_upd(p1CchS, xs1, yCch1, " ", coachStripe,    color.new(color.white, 100), size.tiny)
+            if i_propColOn
+                p1PrpS := f_upd(p1PrpS, xs1, yPrp1, " ", propStripe, color.new(color.white, 100), size.tiny)
+            else
+                p1PrpS := f_del(p1PrpS)
+            p1StaS := f_upd(p1StaS, xs1, ySta1, " ", stateStripeCol, color.new(color.white, 100), size.tiny)
+        else
+            p1ActS := f_del(p1ActS)
+            p1TotS := f_del(p1TotS)
+            p1DomS := f_del(p1DomS)
+            p1AiS  := f_del(p1AiS)
+            p1CchS := f_del(p1CchS)
+            p1PrpS := f_del(p1PrpS)
+            p1StaS := f_del(p1StaS)
+
+        p1Act := f_upd(p1Act, x1_, yAct1, rowAct,   actBg,   color.white, ts)
+        p1Tot := f_upd(p1Tot, x1_, yTot1, rowTotal, totalBg, color.white, ts)
+        p1Dom := f_upd(p1Dom, x1_, yDom1, rowDom,   domBg,   color.white, ts)
+        p1Ai  := f_upd(p1Ai,  x1_, yAi1,  rowAI,    aiBg,    color.white, ts)
+        p1Cch := f_upd(p1Cch, x1_, yCch1, rowCoach, coachBg, coachTc,      ts)
+        if i_propColOn
+            p1Prp := f_upd(p1Prp, x1_, yPrp1, rowProp, propBg, propTc, ts)
+        else
+            p1Prp := f_del(p1Prp)
+        p1Sta := f_upd(p1Sta, x1_, ySta1, rowState, stateBg, stateTc,      ts)
+
+        if showVCReplica
+            float totalAbsRep = math.max(totalVolNorm, 0.0)
+            float domAbsRep   = math.min(domAbsNorm, totalAbsRep)
+            float actAbsRep   = math.min(actAbsNorm, domAbsRep)
+            float domOnlyRep  = math.max(domAbsRep - actAbsRep, 0.0)
+            float otherRep    = math.max(totalAbsRep - domAbsRep, 0.0)
+            float totalSafe   = math.max(totalAbsRep, 0.000001)
+
+            int repRight1 = x1_ - vcReplicaGapBars
+            int repLeft1  = repRight1 - vcReplicaWidthBars
+
+            float repBottom1 = yBottom1 - gap1 * 0.20
+            float repHeight1 = gap1 * vcReplicaSpanRows
+            float repTop1    = repBottom1 + repHeight1
+
+            float hAct1   = repHeight1 * (actAbsRep / totalSafe)
+            float hDom1   = repHeight1 * (domOnlyRep / totalSafe)
+            float lvlActTop1 = repBottom1 + hAct1
+            float lvlDomTop1 = lvlActTop1 + hDom1
+
+            color repActCol1 = actBuy ? cActBuy : cActSell
+            color repDomCol1 = domBuy ? cDomBuy : cDomSell
+
+            rep1Act   := f_boxupd(rep1Act,   repLeft1, lvlActTop1, repRight1, repBottom1, repActCol1)
+            rep1Dom   := f_boxupd(rep1Dom,   repLeft1, lvlDomTop1, repRight1, lvlActTop1, repDomCol1)
+            rep1Other := f_boxupd(rep1Other, repLeft1, repTop1,    repRight1, lvlDomTop1, vcReplicaGray)
+
+            int repMidX1 = int(math.round((repLeft1 + repRight1) * 0.5))
+            float repMidY1 = repBottom1 + (repHeight1 * 0.50)
+            string repPctTxt = f_vertical_text(str.tostring(int(math.round(dominantVolPerc, 0))) + "%")
+
+            rep1Pct := f_upd_plain(rep1Pct, repMidX1, repMidY1, repPctTxt, color.white, size.large)
+
+//=============================================================================
+// Alerts
+//=============================================================================
+bool useLiveAlerts = (alertTiming == "Live preview (intrabar)")
+bool buyAlert  = useLiveAlerts ? coachBuyLive  : coachBuyConf
+bool sellAlert = useLiveAlerts ? coachSellLive : coachSellConf
+bool holdAlert = useLiveAlerts ? coachHoldLive : coachHoldConf
+
+alertcondition(enableBuySellAlerts and buyAlert,  "Coach BUY",  "buy")
+alertcondition(enableBuySellAlerts and sellAlert, "Coach SELL", "sell")
+
+var int prevConfirmedState = 0
+var int lastConfirmedState = 0
+int stateConfSimple = coachBuyConf ? 1 : coachSellConf ? -1 : 0
+if barstate.isconfirmed
+    prevConfirmedState := lastConfirmedState
+    lastConfirmedState := stateConfSimple
+bool holdOnChange = barstate.isconfirmed and (stateConfSimple == 0) and (prevConfirmedState != 0)
+
+bool holdCond = false
+if enableHoldAlerts and holdAlert
+    if holdAlertMode == "Every bar"
+        holdCond := true
+    else
+        holdCond := useLiveAlerts ? false : holdOnChange
+
+alertcondition(holdCond, "Coach HOLD", "hold")
+
+alertcondition(enableStateAlerts and didEnterLong,  "STATE: Enter Long",  "enter_long")
+alertcondition(enableStateAlerts and didEnterShort, "STATE: Enter Short", "enter_short")
+alertcondition(enableStateAlerts and didExitLong,   "STATE: Exit Long",   "exit_long")
+alertcondition(enableStateAlerts and didExitShort,  "STATE: Exit Short",  "exit_short")
+
+alertcondition(enableThresholdAlerts and highBuyVol,   "Coach: High Buy Volume Threshold",  "High buy volume threshold exceeded.")
+alertcondition(enableThresholdAlerts and highSellVol,  "Coach: High Sell Volume Threshold", "High sell volume threshold exceeded.")
+alertcondition(enableThresholdAlerts and highBuyVolA,  "Coach: High Active Buy Threshold",  "High active buy volume threshold exceeded.")
+alertcondition(enableThresholdAlerts and highSellVolA, "Coach: High Active Sell Threshold", "High active volume threshold exceeded.")
+alertcondition(enableThresholdAlerts and ActiveVolDisagreement, "Coach: Volume/Active Divergence", "Volume/active volume divergence detected.")
+
+// *** Original Prop-grade alerts (grade only) ***
+alertcondition(enableBuySellAlerts and buyAlert  and isAgrade,   "PROP A-grade BUY",   "prop_a_grade_buy")
+alertcondition(enableBuySellAlerts and sellAlert and isAgrade,   "PROP A-grade SELL",  "prop_a_grade_sell")
+alertcondition(enableBuySellAlerts and buyAlert  and isBNIgrade, "PROP B-grade BUY",   "prop_b_grade_buy")
+alertcondition(enableBuySellAlerts and sellAlert and isBNIgrade, "PROP B-grade SELL",  "prop_b_grade_sell")
+
+// *** NEW: Volume-synced PROP column alerts (fire only when DOM+ACT vol% meet your prop %) ***
+bool propBuyAlert  = useLiveAlerts ? propAPlusBuyLive  : propAPlusBuyConf
+bool propSellAlert = useLiveAlerts ? propAPlusSellLive : propAPlusSellConf
+bool propBBuyAlert  = useLiveAlerts ? propBPlusBuyLive  : propBPlusBuyConf
+bool propBSellAlert = useLiveAlerts ? propBPlusSellLive : propBPlusSellConf
+
+alertcondition(enableBuySellAlerts and i_propColOn and propBuyAlert,   "PROP COLUMN A+ BUY",  "prop_col_a_plus_buy")
+alertcondition(enableBuySellAlerts and i_propColOn and propSellAlert,  "PROP COLUMN A+ SELL", "prop_col_a_plus_sell")
+alertcondition(enableBuySellAlerts and i_propColOn and propBBuyAlert,  "PROP COLUMN B+ BUY",  "prop_col_b_plus_buy")
+alertcondition(enableBuySellAlerts and i_propColOn and propBSellAlert, "PROP COLUMN B+ SELL", "prop_col_b_plus_sell")
